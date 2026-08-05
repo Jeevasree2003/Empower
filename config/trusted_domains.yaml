@@ -1,0 +1,23 @@
+# Curated allowlist for live knowledge retrieval.
+# Only results from these domains are accepted as knowledge sources.
+# Expand deliberately after review — do not add domains casually.
+
+government_legal:
+  - indiacode.nic.in
+  - ncw.nic.in
+  - cybercrime.gov.in
+  - mha.gov.in
+  - nalsa.gov.in
+  - india.gov.in
+  - meity.gov.in
+
+health_medical:
+  - who.int
+  - nimhans.ac.in
+  - mohfw.gov.in
+
+ngo_support:
+  - vandrevalafoundation.com
+  - iCALLhelpline.org
+  - sangath.in
+  - snehaindia.org

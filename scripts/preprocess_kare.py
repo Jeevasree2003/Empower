@@ -6,9 +6,10 @@ import argparse
 import json
 import random
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional
 
 from ktc.pipeline import KnowledgeTripletPipeline
+from ktc.triplet import Triplet
 
 KNOWLEDGE_SEP = "__knowledge__"
 NO_PASSAGE_USED = "no_passages_used"
@@ -68,6 +69,7 @@ def build_turn_examples(
     knowledge_text = dialogue.get("knowledge", "") or ""
     examples: List[dict] = []
     history: List[str] = []
+    filtered_triplets: Optional[List[Triplet]] = None
 
     for utterance in utterances:
         formatted = format_utterance(utterance)
@@ -78,7 +80,9 @@ def build_turn_examples(
             if knowledge_mode == "raw":
                 verbalized = pipeline.run_raw_knowledge(knowledge_text)
             else:
-                verbalized = pipeline.run(knowledge_text, dialog_history)
+                if filtered_triplets is None:
+                    filtered_triplets = pipeline.get_filtered_triplets(knowledge_text)
+                verbalized = pipeline.run(knowledge_text, dialog_history, filtered=filtered_triplets)
 
             if verbalized:
                 knowledge_for_training = " ".join(verbalized)

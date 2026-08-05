@@ -7,8 +7,10 @@ nltk
 spacy
 sentence-transformers
 numpy
+pyyaml
+requests
 
-# Optional: LLM verbalization (Stage 2e backend=llm)
+# Live retrieval + summarization (hybrid knowledge path)
 # openai
 
 # After install, download spaCy model:
