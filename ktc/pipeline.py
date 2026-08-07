@@ -32,6 +32,7 @@ class KnowledgeTripletPipeline:
 
     top_k: int = 26
     openie_backend: str = "spacy"
+    coref_backend: str = "heuristic"
     verbalization_backend: str = "template"
     ranker: Optional[SentenceBertRanker] = field(default=None, repr=False)
     _nlp: Optional[object] = field(default=None, repr=False)
@@ -62,7 +63,7 @@ class KnowledgeTripletPipeline:
             cleaned = clean_knowledge_text(knowledge_text)
             nlp = self._get_nlp()
             raw = extract_triplets(cleaned, backend=self.openie_backend, nlp=nlp)
-            resolved = resolve_coreferences(raw, cleaned, nlp=nlp)
+            resolved = resolve_coreferences(raw, cleaned, nlp=nlp, backend=self.coref_backend)
             self._knowledge_cache[digest] = filter_triplets(resolved)
         return self._knowledge_cache[digest]
 
@@ -146,7 +147,7 @@ class KnowledgeTripletPipeline:
         cleaned = clean_knowledge_text(knowledge_text)
         nlp = self._get_nlp()
         raw = extract_triplets(cleaned, backend=self.openie_backend, nlp=nlp)
-        resolved = resolve_coreferences(raw, cleaned, nlp=nlp)
+        resolved = resolve_coreferences(raw, cleaned, nlp=nlp, backend=self.coref_backend)
         filtered = filter_triplets(resolved)
         hybrid = self.run_hybrid(
             knowledge_text,

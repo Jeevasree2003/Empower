@@ -13,12 +13,47 @@ from typing import Iterable, List
 
 from ktc.triplet import Triplet
 
+_COPULA_PREFIXES = ("is ", "are ", "was ", "were ", "has been ", "have been ", "had been ")
+_MODAL_PREFIXES = ("can ", "may ", "should ", "must ", "will ", "could ", "would ", "might ")
+_PERFECT_PREFIXES = ("has ", "have ", "had ")
+_PRESENT_PARTICIPLE = re.compile(r"^(?:is|are|was|were|has been|have been|had been) \w+ing\b")
+
+# Few-shot examples for LLM verbalization (paper-style single-sentence output).
+_LLM_FEW_SHOT_EXAMPLES = """
+Example 1:
+Head: Cyber Cells
+Relation: are present in
+Tail: every state
+Sentence: Cyber Cells are present in every state.
+
+Example 2:
+Head: victim
+Relation: can file
+Tail: an online complaint
+Sentence: A victim can file an online complaint.
+
+Example 3:
+Head: the police
+Relation: was filed by
+Tail: the complaint
+Sentence: The complaint was filed by the police.
+""".strip()
+
 
 def _clean(text: str) -> str:
     text = re.sub(r"\s+", " ", text.strip())
     if text and text[-1] not in ".!?":
         text += "."
     return text
+
+
+def _is_passive_relation(relation_lower: str) -> bool:
+    if relation_lower.endswith(" by"):
+        return True
+    return bool(
+        re.match(r"^(?:is|are|was|were|has been|have been|had been) \w+ed\b", relation_lower)
+        or re.match(r"^(?:is|are|was|were) \w+en\b", relation_lower)
+    )
 
 
 def verbalize_template(triplet: Triplet) -> str:
@@ -28,12 +63,17 @@ def verbalize_template(triplet: Triplet) -> str:
     tail = triplet.tail.strip()
 
     relation_lower = relation.lower()
-    if relation_lower.startswith(("is ", "are ", "was ", "were ")):
-        sentence = f"{head} {relation} {tail}"
-    elif any(relation_lower.startswith(v) for v in ("can ", "may ", "should ", "must ", "will ")):
-        sentence = f"{head} {relation} {tail}"
-    elif relation_lower.endswith(" by"):
+
+    if _is_passive_relation(relation_lower) or relation_lower.endswith(" by"):
         sentence = f"{tail} {relation} {head}"
+    elif relation_lower.startswith(_COPULA_PREFIXES):
+        sentence = f"{head} {relation} {tail}"
+    elif relation_lower.startswith(_MODAL_PREFIXES):
+        sentence = f"{head} {relation} {tail}"
+    elif relation_lower.startswith(_PERFECT_PREFIXES):
+        sentence = f"{head} {relation} {tail}"
+    elif _PRESENT_PARTICIPLE.match(relation_lower):
+        sentence = f"{head} {relation} {tail}"
     else:
         sentence = f"{head} {relation} {tail}"
 
@@ -49,15 +89,25 @@ def verbalize_llm(triplets: Iterable[Triplet], model: str = "gpt-4o-mini") -> Li
 
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
     sentences: List[str] = []
+    system_prompt = (
+        "Convert knowledge triplets into one fluent English sentence each. "
+        "Write natural sentences, not concatenations. "
+        "Match the style of these examples:\n\n"
+        f"{_LLM_FEW_SHOT_EXAMPLES}"
+    )
     for triplet in triplets:
-        prompt = (
-            "Convert the following knowledge triplet into one fluent English sentence. "
-            "Do not simply concatenate the parts; write a natural sentence.\n"
-            f"Head: {triplet.head}\nRelation: {triplet.relation}\nTail: {triplet.tail}"
+        user_prompt = (
+            f"Head: {triplet.head}\n"
+            f"Relation: {triplet.relation}\n"
+            f"Tail: {triplet.tail}\n"
+            "Sentence:"
         )
         response = client.chat.completions.create(
             model=model,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
             temperature=0.2,
             max_tokens=80,
         )

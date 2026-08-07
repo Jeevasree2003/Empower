@@ -29,6 +29,21 @@ CONJUNCTIONS = {
     "though",
 }
 
+# Rule 6 — reject bare pronoun / deictic heads (coref failed or never ran).
+_GENERIC_PRONOUN_HEADS = frozenset(
+    {"it", "this", "that", "these", "those", "he", "she", "they", "we", "i", "you"}
+)
+
+# Rule 7 — reject tails that are only an unresolved pronoun.
+_UNRESOLVED_PRONOUN_TAILS = frozenset(
+    {"it", "this", "that", "these", "those", "he", "she", "him", "her", "them", "they", "we", "us"}
+)
+
+# Relation tokens that are not verbs on their own (stopword-only relations).
+_RELATION_STOPWORDS = frozenset(
+    {"a", "an", "the", "to", "of", "in", "on", "at", "for", "with", "by", "from", "as"}
+)
+
 
 def _ensure_nltk():
     for resource in ("punkt", "averaged_perceptron_tagger", "wordnet"):
@@ -61,6 +76,21 @@ def _starts_with_conjunction(text: str) -> bool:
     return first in CONJUNCTIONS
 
 
+def _is_bare_pronoun_head(head: str) -> bool:
+    words = re.findall(r"[a-z']+", head.strip().lower())
+    return len(words) == 1 and words[0] in _GENERIC_PRONOUN_HEADS
+
+
+def _is_unresolved_pronoun_tail(tail: str) -> bool:
+    words = re.findall(r"[a-z']+", tail.strip().lower())
+    return len(words) == 1 and words[0] in _UNRESOLVED_PRONOUN_TAILS
+
+
+def _relation_is_stopword_only(relation: str) -> bool:
+    words = re.findall(r"[a-z']+", relation.strip().lower())
+    return bool(words) and all(w in _RELATION_STOPWORDS for w in words)
+
+
 def passes_filters(triplet: Triplet) -> bool:
     if triplet.tail.strip().lower() == triplet.head.strip().lower():
         return False
@@ -73,6 +103,12 @@ def passes_filters(triplet: Triplet) -> bool:
     if not _contains_verb(triplet.as_text()):
         return False
     if _starts_with_conjunction(triplet.head) or _starts_with_conjunction(triplet.tail):
+        return False
+    if _is_bare_pronoun_head(triplet.head):
+        return False
+    if _is_unresolved_pronoun_tail(triplet.tail):
+        return False
+    if _relation_is_stopword_only(triplet.relation):
         return False
     return True
 

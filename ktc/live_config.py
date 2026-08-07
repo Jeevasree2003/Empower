@@ -47,7 +47,7 @@ class LiveRetrievalConfig:
                 domain_groups = yaml.safe_load(f) or {}
             for group in domain_groups.values():
                 if isinstance(group, list):
-                    trusted.extend(group)
+                    trusted.extend(d.lower().strip() for d in group if d)
 
         return cls(
             enable_live_retrieval=bool(data.get("enable_live_retrieval", True)),

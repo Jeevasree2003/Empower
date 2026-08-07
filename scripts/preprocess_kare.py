@@ -124,6 +124,7 @@ def preprocess(
     seed: int = 42,
     knowledge_mode: str = "ktc",
     verbalization_backend: str = "template",
+    coref_backend: str = "heuristic",
     top_k: int = 26,
     max_dialogues: Optional[int] = None,
 ) -> Dict[str, int]:
@@ -135,6 +136,7 @@ def preprocess(
     pipeline = KnowledgeTripletPipeline(
         top_k=top_k,
         verbalization_backend=verbalization_backend,
+        coref_backend=coref_backend,
     )
 
     counts = {}
@@ -176,6 +178,12 @@ def main():
         default="template",
         help="Verbalization backend for Stage 2e.",
     )
+    parser.add_argument(
+        "--coref_backend",
+        choices=["heuristic", "model"],
+        default="heuristic",
+        help="Coreference backend for Stage 2c (heuristic=local rules, model=coreferee).",
+    )
     parser.add_argument("--top_k", type=int, default=26)
     parser.add_argument(
         "--max_dialogues",
@@ -194,6 +202,7 @@ def main():
         seed=args.seed,
         knowledge_mode=args.knowledge_mode,
         verbalization_backend=args.verbalization_backend,
+        coref_backend=args.coref_backend,
         top_k=args.top_k,
         max_dialogues=args.max_dialogues,
     )

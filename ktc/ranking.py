@@ -29,6 +29,16 @@ class RankingResult:
     top1_score: float
 
 
+def _stable_rank_order(scores: np.ndarray, top_k: int) -> np.ndarray:
+    """Return indices of top-*top_k* scores with deterministic tie-breaking."""
+    n = len(scores)
+    if n == 0:
+        return np.array([], dtype=int)
+    indices = np.arange(n)
+    # lexsort: last key is primary — sort by score desc, then index asc for ties.
+    return np.lexsort((indices, -scores))[:top_k]
+
+
 class SentenceBertRanker:
     def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
         from sentence_transformers import SentenceTransformer
@@ -42,12 +52,13 @@ class SentenceBertRanker:
         if not triplet_list:
             return RankingResult(triplets=[], scores=[], top1_score=0.0)
 
-        history_emb = self.model.encode(dialog_history, normalize_embeddings=True)
+        history_text = dialog_history.strip() or " "
+        history_emb = self.model.encode(history_text, normalize_embeddings=True)
         triplet_texts = [t.as_text() for t in triplet_list]
         triplet_embs = self.model.encode(triplet_texts, normalize_embeddings=True)
 
         scores = np.dot(triplet_embs, history_emb)
-        order = np.argsort(scores)[::-1][:top_k]
+        order = _stable_rank_order(scores, top_k)
         ranked = [triplet_list[i] for i in order]
         ranked_scores = [float(scores[i]) for i in order]
         top1 = ranked_scores[0] if ranked_scores else 0.0
@@ -63,12 +74,13 @@ class SentenceBertRanker:
         if not candidate_list:
             return CandidateRankingResult(candidates=[], scores=[], top1_score=0.0)
 
-        history_emb = self.model.encode(dialog_history, normalize_embeddings=True)
+        history_text = dialog_history.strip() or " "
+        history_emb = self.model.encode(history_text, normalize_embeddings=True)
         texts = [c.text for c in candidate_list]
         embs = self.model.encode(texts, normalize_embeddings=True)
 
         scores = np.dot(embs, history_emb)
-        order = np.argsort(scores)[::-1][:top_k]
+        order = _stable_rank_order(scores, top_k)
         ranked = [candidate_list[i] for i in order]
         ranked_scores = [float(scores[i]) for i in order]
         top1 = ranked_scores[0] if ranked_scores else 0.0

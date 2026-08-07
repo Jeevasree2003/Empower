@@ -1,20 +1,33 @@
 """Unit tests for KTC sub-steps."""
 
 import json
+import os
 import unittest
 from pathlib import Path
+from unittest import mock
+
+import numpy as np
 
 from ktc.coreference import resolve_coreferences
 from ktc.entity_extraction import CATEGORY_CRIME, extract_entities
-from ktc.extraction import _relation_span
+from ktc.extraction import _relation_span, extract_triplets
 from ktc.filtering import passes_filters
+from ktc.knowledge_item import KnowledgeCandidate
+from ktc.live_config import ApiCallBudget, LiveRetrievalConfig
+from ktc.live_knowledge import fetch_live_knowledge, static_candidates_from_triplets
+from ktc.live_retrieval import SearchResult, _domain_allowed
+from ktc.live_summarize import summarize_search_results
 from ktc.query_builder import build_queries
+from ktc.ranking import _stable_rank_order
 from ktc.triplet import Triplet
 from ktc.verbalization import verbalize_template
 
-DATA_PATH = Path(__file__).resolve().parents[2].parent / "KARE-data" / "KARE" / "Data" / "KARE.jsonl"
-if not DATA_PATH.exists():
-    DATA_PATH = Path(r"C:\Users\pg\Downloads\pro\KARE-data\KARE\Data\KARE.jsonl")
+# KARE.jsonl path: env override, then repo-relative default; skip integration tests if missing.
+_DATA_ENV = os.environ.get("KARE_JSONL_PATH")
+if _DATA_ENV:
+    DATA_PATH = Path(_DATA_ENV)
+else:
+    DATA_PATH = Path(__file__).resolve().parents[2].parent / "KARE-data" / "KARE" / "Data" / "KARE.jsonl"
 
 BAD_COREF_HEADS = frozenset({"all the tasks", "millennials", "the matter"})
 
@@ -48,6 +61,50 @@ class TestRelationSpan(unittest.TestCase):
         self.assertEqual(_relation_span(verb), "give up")
 
 
+class TestExtraction(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import spacy
+
+        cls.nlp = spacy.load("en_core_web_sm")
+
+    def _extract(self, sentence: str):
+        return extract_triplets(sentence, nlp=self.nlp)
+
+    def test_passive_with_by_agent(self):
+        triplets = self._extract("The complaint was filed by the victim at the police station.")
+        self.assertGreater(len(triplets), 0)
+        heads = {t.head.lower() for t in triplets}
+        self.assertTrue(any("victim" in h for h in heads))
+
+    def test_coordinated_subjects(self):
+        triplets = self._extract("Cyber Cell and police can file online complaints.")
+        self.assertGreaterEqual(len(triplets), 2)
+        heads = {t.head.lower() for t in triplets}
+        self.assertTrue(any("cyber" in h for h in heads))
+        self.assertTrue(any("police" in h for h in heads))
+
+    def test_real_kare_sentence_patterns(self):
+        if not DATA_PATH.exists():
+            self.skipTest("KARE.jsonl not available (set KARE_JSONL_PATH)")
+
+        samples = []
+        with DATA_PATH.open(encoding="utf-8") as f:
+            for line in f:
+                record = json.loads(line)
+                knowledge = record.get("knowledge", "")
+                if "Cyber Cell" in knowledge or "complaint" in knowledge.lower():
+                    samples.append(knowledge[:800])
+                if len(samples) >= 3:
+                    break
+
+        for text in samples:
+            triplets = extract_triplets(text, nlp=self.nlp)
+            self.assertIsInstance(triplets, list)
+            for t in triplets:
+                self.assertTrue(t.head and t.relation and t.tail)
+
+
 class TestFiltering(unittest.TestCase):
     def test_rejects_identical_head_tail(self):
         triplet = Triplet("police", "helps", "police")
@@ -69,12 +126,40 @@ class TestFiltering(unittest.TestCase):
         triplet = Triplet("victim", "can file", "online complaint")
         self.assertTrue(passes_filters(triplet))
 
+    def test_rejects_bare_pronoun_head(self):
+        triplet = Triplet("it", "is", "a cyber crime portal")
+        self.assertFalse(passes_filters(triplet))
+
+    def test_rejects_unresolved_pronoun_tail(self):
+        triplet = Triplet("victim", "can contact", "it")
+        self.assertFalse(passes_filters(triplet))
+
+    def test_rejects_stopword_only_relation(self):
+        triplet = Triplet("police station", "to the", "complaint desk")
+        self.assertFalse(passes_filters(triplet))
+
 
 class TestVerbalization(unittest.TestCase):
     def test_template_adds_punctuation(self):
         sentence = verbalize_template(Triplet("Cyber Cells", "are present in", "every state"))
         self.assertTrue(sentence.endswith("."))
         self.assertIn("Cyber Cells", sentence)
+
+    def test_passive_inverts_head_tail(self):
+        sentence = verbalize_template(Triplet("the police", "was filed by", "the complaint"))
+        self.assertIn("complaint", sentence)
+        self.assertIn("police", sentence)
+        self.assertTrue(sentence.lower().startswith("the complaint"))
+
+    def test_has_perfect_tense(self):
+        sentence = verbalize_template(Triplet("NCW", "has launched", "a helpline"))
+        self.assertIn("NCW", sentence)
+        self.assertIn("helpline", sentence)
+
+    def test_present_participle(self):
+        sentence = verbalize_template(Triplet("victims", "are facing", "online harassment"))
+        self.assertIn("victims", sentence)
+        self.assertIn("harassment", sentence)
 
 
 class TestCoreference(unittest.TestCase):
@@ -101,6 +186,20 @@ class TestCoreference(unittest.TestCase):
         self.assertEqual(len(resolved), 1)
         self.assertIn("Maria", resolved[0].head)
 
+    def test_two_sentence_lookback(self):
+        knowledge = "Ravi contacted the helpline. He was scared. He filed a complaint."
+        raw = [Triplet("He", "filed", "a complaint")]
+        resolved = self._resolve(knowledge, raw)
+        self.assertIn("Ravi", resolved[0].head)
+
+    def test_ambiguous_gender_requires_person_antecedent(self):
+        knowledge = "The portal and Maria are available. He filed a complaint."
+        raw = [Triplet("He", "filed", "a complaint")]
+        resolved = self._resolve(knowledge, raw)
+        # Should resolve to Maria (PERSON), not "the portal".
+        self.assertIn("Maria", resolved[0].head)
+        self.assertNotIn("portal", resolved[0].head.lower())
+
     def test_no_antecedent_left_unsubstituted(self):
         knowledge = "It is important to file complaints quickly."
         raw = [Triplet("It", "is", "important to file complaints quickly")]
@@ -110,10 +209,9 @@ class TestCoreference(unittest.TestCase):
 
     def test_no_document_global_fallback_on_real_dialogues(self):
         if not DATA_PATH.exists():
-            self.skipTest("KARE.jsonl not available")
+            self.skipTest("KARE.jsonl not available (set KARE_JSONL_PATH)")
 
         from ktc.cleaning import clean_knowledge_text
-        from ktc.extraction import extract_triplets
 
         for did in ("100", "3000", "4500"):
             with self.subTest(dialogue_id=did):
@@ -134,6 +232,187 @@ class TestCoreference(unittest.TestCase):
                     [],
                     f"dialogue {did} still has document-global coref substitutions: {bad_heads}",
                 )
+
+
+class TestRanking(unittest.TestCase):
+    def test_stable_rank_order_breaks_ties_by_index(self):
+        scores = np.array([0.5, 0.5, 0.9, 0.5])
+        order = _stable_rank_order(scores, top_k=4)
+        self.assertEqual(int(order[0]), 2)
+        self.assertEqual(list(order[1:]), [0, 1, 3])
+
+    def test_stable_rank_order_empty(self):
+        order = _stable_rank_order(np.array([]), top_k=5)
+        self.assertEqual(len(order), 0)
+
+    def test_mixed_pool_ranking_no_length_bias(self):
+        """Static and live candidates with equal relevance should both appear in top-k."""
+        from ktc.ranking import SentenceBertRanker
+
+        class _MockRanker(SentenceBertRanker):
+            def __init__(self):
+                pass
+
+            def rank_candidates_with_scores(self, dialog_history, candidates, top_k=26):
+                from ktc.ranking import CandidateRankingResult
+
+                candidate_list = list(candidates)
+                scores = []
+                for c in candidate_list:
+                    base = 0.8 if "domestic violence" in c.text.lower() else 0.3
+                    scores.append(base)
+                order = _stable_rank_order(np.array(scores), top_k)
+                ranked = [candidate_list[i] for i in order]
+                ranked_scores = [scores[i] for i in order]
+                return CandidateRankingResult(
+                    candidates=ranked, scores=ranked_scores, top1_score=ranked_scores[0]
+                )
+
+        pool = [
+            KnowledgeCandidate(text="short static", source="static_dataset"),
+            KnowledgeCandidate(
+                text="domestic violence helpline India 2026 official procedure",
+                source="live_api",
+                url="https://ncw.nic.in/example",
+            ),
+            KnowledgeCandidate(
+                text="another long static triplet about unrelated fraud scams online",
+                source="static_dataset",
+            ),
+        ]
+        ranker = _MockRanker()
+        result = ranker.rank_candidates_with_scores("domestic violence threat", pool, top_k=2)
+        sources = {c.source for c in result.candidates}
+        self.assertIn("live_api", sources)
+        self.assertEqual(result.candidates[0].source, "live_api")
+
+
+class TestLiveConfig(unittest.TestCase):
+    def test_trusted_domains_lowercased_at_load(self):
+        config = LiveRetrievalConfig.load()
+        self.assertTrue(all(d == d.lower() for d in config.trusted_domains))
+        self.assertIn("icallhelpline.org", config.trusted_domains)
+
+    def test_api_call_budget(self):
+        budget = ApiCallBudget(2)
+        self.assertTrue(budget.can_call())
+        budget.record(1)
+        budget.record(1)
+        self.assertFalse(budget.can_call())
+
+
+class TestLiveRetrieval(unittest.TestCase):
+    def test_domain_allowed_case_insensitive(self):
+        domains = ["icallhelpline.org", "ncw.nic.in"]
+        self.assertTrue(_domain_allowed("https://iCALLhelpline.org/page", domains))
+        self.assertTrue(_domain_allowed("https://www.ncw.nic.in/", domains))
+        self.assertFalse(_domain_allowed("https://example.com/", domains))
+
+    @mock.patch("ktc.live_retrieval._search_tavily")
+    def test_search_allowlisted_filters_domains(self, mock_search):
+        mock_search.return_value = [
+            {"url": "https://cybercrime.gov.in/report", "title": "Report", "content": "info"},
+            {"url": "https://spam.example.com/fake", "title": "Fake", "content": "junk"},
+        ]
+        config = LiveRetrievalConfig(
+            trusted_domains=["cybercrime.gov.in"],
+            results_per_query=3,
+            search_provider="tavily",
+        )
+        with mock.patch.dict(os.environ, {"LIVE_SEARCH_API_KEY": "test-key"}):
+            from ktc.live_retrieval import search_allowlisted
+
+            results = search_allowlisted("how to report cybercrime", config)
+        self.assertEqual(len(results), 1)
+        self.assertIn("cybercrime.gov.in", results[0].domain)
+
+
+class TestLiveSummarize(unittest.TestCase):
+    def test_per_source_attribution(self):
+        import sys
+
+        results = [
+            SearchResult(url="https://ncw.nic.in/a", title="NCW", snippet="181 helpline", domain="ncw.nic.in"),
+            SearchResult(
+                url="https://cybercrime.gov.in/b", title="Cyber", snippet="file FIR", domain="cybercrime.gov.in"
+            ),
+        ]
+        config = LiveRetrievalConfig(llm_model="gpt-4o-mini", results_per_query=2)
+
+        def fake_summarize(query, result, config, client):
+            if "ncw" in result.url:
+                return ["Helpline number is 181."]
+            return ["FIR can be filed online."]
+
+        fake_openai = mock.MagicMock()
+        with mock.patch.dict(os.environ, {"LLM_API_KEY": "test-key"}):
+            with mock.patch.dict(sys.modules, {"openai": fake_openai}):
+                with mock.patch("ktc.live_summarize._summarize_one_source", side_effect=fake_summarize):
+                    sentences = summarize_search_results("domestic violence helpline", results, config)
+        self.assertEqual(len(sentences), 2)
+        urls = {s.source_url for s in sentences}
+        self.assertEqual(urls, {"https://ncw.nic.in/a", "https://cybercrime.gov.in/b"})
+
+    def test_no_relevant_info_returns_empty(self):
+        import sys
+
+        results = [
+            SearchResult(url="https://who.int/x", title="WHO", snippet="unrelated", domain="who.int"),
+        ]
+        config = LiveRetrievalConfig(llm_model="gpt-4o-mini", results_per_query=1)
+        fake_openai = mock.MagicMock()
+
+        with mock.patch.dict(os.environ, {"LLM_API_KEY": "test-key"}):
+            with mock.patch.dict(sys.modules, {"openai": fake_openai}):
+                with mock.patch("ktc.live_summarize._summarize_one_source", return_value=[]):
+                    sentences = summarize_search_results("query", results, config)
+        self.assertEqual(sentences, [])
+
+
+class TestLiveKnowledge(unittest.TestCase):
+    @mock.patch("ktc.live_knowledge.summarize_search_results")
+    @mock.patch("ktc.live_knowledge.search_allowlisted")
+    def test_fetch_live_knowledge_offline(self, mock_search, mock_summarize):
+        mock_search.return_value = [
+            SearchResult(url="https://ncw.nic.in/h", title="t", snippet="s", domain="ncw.nic.in"),
+        ]
+        from ktc.live_summarize import LiveKnowledgeSentence
+
+        mock_summarize.return_value = [
+            LiveKnowledgeSentence(
+                sentence="The NCW helpline number is 7827170170.",
+                source_url="https://ncw.nic.in/h",
+                query="domestic violence helpline India",
+            )
+        ]
+        config = LiveRetrievalConfig(enable_live_retrieval=True, max_live_queries_per_dialogue=1)
+        budget = ApiCallBudget(10)
+        candidates, queries, raw = fetch_live_knowledge(
+            "my husband threatens me", config, budget
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source, "live_api")
+        self.assertEqual(candidates[0].url, "https://ncw.nic.in/h")
+
+    def test_static_candidates_from_triplets(self):
+        t = Triplet("victim", "can file", "complaint")
+        candidates = static_candidates_from_triplets([t])
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source, "static_dataset")
+        self.assertIsNotNone(candidates[0].triplet)
+
+
+class TestKnowledgeItem(unittest.TestCase):
+    def test_to_dict_includes_source(self):
+        item = KnowledgeCandidate(
+            text="Section 498A addresses cruelty.",
+            source="live_api",
+            url="https://indiacode.nic.in/x",
+            query="domestic violence law",
+        )
+        payload = item.to_dict()
+        self.assertEqual(payload["source"], "live_api")
+        self.assertEqual(payload["url"], "https://indiacode.nic.in/x")
 
 
 class TestEntityExtraction(unittest.TestCase):

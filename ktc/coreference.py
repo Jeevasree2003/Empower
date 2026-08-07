@@ -1,11 +1,14 @@
-"""Stage 2c — Sentence-local coreference resolution for pronoun heads."""
+"""Stage 2c — Coreference resolution for pronoun heads."""
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Iterable, List, Optional, Sequence
 
 from ktc.triplet import Triplet
+
+logger = logging.getLogger(__name__)
 
 PRONOUNS = {
     "he",
@@ -19,6 +22,7 @@ PRONOUNS = {
     "hers",
     "their",
     "theirs",
+    "its",
     "this",
     "that",
     "these",
@@ -34,12 +38,21 @@ FEMININE = {"she", "her", "hers"}
 PLURAL = {"they", "them", "their", "theirs", "we", "us", "our", "ours"}
 NEUTER = {"it", "its", "this", "that", "these", "those"}
 
+# Dummy "it" constructions — do not resolve (impersonal / extraposition).
+_IMPERSONAL_IT_RE = re.compile(
+    r"^\s*it\s+(?:is|was|are|were|seems|appears|becomes|became)\s+",
+    re.IGNORECASE,
+)
+
 _FEMININE_HINTS = frozenset(
     {"she", "her", "woman", "women", "mother", "wife", "girl", "daughter", "sister", "ms", "mrs"}
 )
 _MASCULINE_HINTS = frozenset(
     {"he", "him", "man", "men", "father", "husband", "boy", "son", "brother", "mr", "dad"}
 )
+
+# How many preceding sentences the heuristic searches (same sentence always first).
+MAX_ANTECEDENT_LOOKBACK = 3
 
 
 def _sentences(text: str, nlp) -> List:
@@ -63,6 +76,14 @@ def _pronoun_class(pronoun: str) -> str:
     if p in PLURAL:
         return "plural"
     return "neuter"
+
+
+def _is_impersonal_it(triplet: Triplet, sent_doc) -> bool:
+    """Skip resolving 'It is/was ...' dummy-subject patterns."""
+    first = triplet.head.strip().split()[0].lower()
+    if first != "it":
+        return False
+    return bool(_IMPERSONAL_IT_RE.match(sent_doc.text))
 
 
 def _pronoun_token_index(sent_doc, head: str) -> Optional[int]:
@@ -135,18 +156,31 @@ def _collect_candidates(sent_doc, before_char: Optional[int] = None) -> List:
 
 
 def _pick_from_compatible(compatible: List, pronoun_class: str) -> Optional[str]:
-  if not compatible:
-    return None
-  if pronoun_class in {"masc", "fem"}:
-    for chunk in reversed(compatible):
-      if chunk.root.ent_type_ == "PERSON" or chunk.root.pos_ == "PROPN":
-        return chunk.text.strip()
+    if not compatible:
+        return None
+    if pronoun_class in {"masc", "fem"}:
+        # Prefer nearest preceding PERSON/PROPN; require one for gendered pronouns
+        # when multiple candidates exist (reduces wrong substitutions).
+        person_chunks = [
+            c for c in reversed(compatible)
+            if c.root.ent_type_ == "PERSON" or c.root.pos_ == "PROPN"
+        ]
+        if person_chunks:
+            return person_chunks[0].text.strip()
+        if len(compatible) == 1:
+            return compatible[0].text.strip()
+        return None
     return compatible[-1].text.strip()
-  return compatible[-1].text.strip()
 
 
-def _pick_antecedent(sent_docs: Sequence, sent_idx: int, pronoun_char: Optional[int], pronoun_class: str):
-    """Search same sentence then one preceding sentence for a local antecedent."""
+def _pick_antecedent(
+    sent_docs: Sequence,
+    sent_idx: int,
+    pronoun_char: Optional[int],
+    pronoun_class: str,
+    max_lookback: int = MAX_ANTECEDENT_LOOKBACK,
+) -> Optional[str]:
+    """Search same sentence then up to *max_lookback* preceding sentences."""
     current = sent_docs[sent_idx]
 
     same_sent = _collect_candidates(current, before_char=pronoun_char)
@@ -156,37 +190,50 @@ def _pick_antecedent(sent_docs: Sequence, sent_idx: int, pronoun_char: Optional[
         if chosen:
             return chosen
 
-    if sent_idx > 0:
-        prev_candidates = _collect_candidates(sent_docs[sent_idx - 1])
+    for offset in range(1, max_lookback + 1):
+        prev_idx = sent_idx - offset
+        if prev_idx < 0:
+            break
+        prev_candidates = _collect_candidates(sent_docs[prev_idx])
         compatible = [c for c in prev_candidates if _chunk_compatible(c, pronoun_class)]
-        if compatible:
-            if pronoun_class in {"masc", "fem"}:
-                for chunk in compatible:
-                    if chunk.root.ent_type_ == "PERSON" or chunk.root.pos_ == "PROPN":
-                        return chunk.text.strip()
+        if not compatible:
+            continue
+        if pronoun_class in {"masc", "fem"}:
+            for chunk in reversed(compatible):
+                if chunk.root.ent_type_ == "PERSON" or chunk.root.pos_ == "PROPN":
+                    return chunk.text.strip()
+            if len(compatible) == 1:
                 return compatible[0].text.strip()
-            return compatible[-1].text.strip()
+            continue
+        return compatible[-1].text.strip()
     return None
 
 
-def _resolve_pronoun_head(pronoun: str, triplet: Triplet, sent_docs: Sequence) -> Optional[str]:
+def _resolve_pronoun_head(
+    pronoun: str,
+    triplet: Triplet,
+    sent_docs: Sequence,
+    max_lookback: int = MAX_ANTECEDENT_LOOKBACK,
+) -> Optional[str]:
     sent_doc = _find_source_sentence(triplet, sent_docs)
     if sent_doc is None:
+        return None
+
+    if _is_impersonal_it(triplet, sent_doc):
         return None
 
     sent_idx = sent_docs.index(sent_doc)
     pronoun_char = _pronoun_token_index(sent_doc, triplet.head)
     pronoun_class = _pronoun_class(pronoun)
-    return _pick_antecedent(sent_docs, sent_idx, pronoun_char, pronoun_class)
+    return _pick_antecedent(sent_docs, sent_idx, pronoun_char, pronoun_class, max_lookback)
 
 
-def resolve_coreferences(triplets: Iterable[Triplet], knowledge_text: str, nlp=None) -> List[Triplet]:
-    """Replace pronoun heads using sentence-local noun-phrase antecedents."""
-    if nlp is None:
-        import spacy
-
-        nlp = spacy.load("en_core_web_sm")
-
+def _resolve_heuristic(
+    triplets: Iterable[Triplet],
+    knowledge_text: str,
+    nlp,
+    max_lookback: int = MAX_ANTECEDENT_LOOKBACK,
+) -> List[Triplet]:
     sent_docs = _sentences(knowledge_text, nlp)
     resolved: List[Triplet] = []
 
@@ -196,7 +243,7 @@ def resolve_coreferences(triplets: Iterable[Triplet], knowledge_text: str, nlp=N
             continue
 
         pronoun = triplet.head.strip().split()[0].lower().strip(".,;:!?'\"()[]{}")
-        replacement = _resolve_pronoun_head(pronoun, triplet, sent_docs)
+        replacement = _resolve_pronoun_head(pronoun, triplet, sent_docs, max_lookback)
         if replacement is None:
             resolved.append(triplet)
             continue
@@ -206,3 +253,110 @@ def resolve_coreferences(triplets: Iterable[Triplet], knowledge_text: str, nlp=N
         resolved.append(Triplet(head=new_head, relation=triplet.relation, tail=triplet.tail))
 
     return resolved
+
+
+def _ensure_coreferee(nlp):
+    """Attach coreferee to *nlp* if not already present."""
+    if nlp.has_pipe("coreferee"):
+        return nlp
+    try:
+        import coreferee  # noqa: F401
+    except ImportError as exc:
+        raise ImportError(
+            "coreferee is required for coref_backend='model'. "
+            "Install with: pip install coreferee"
+        ) from exc
+    nlp.add_pipe("coreferee")
+    return nlp
+
+
+def _antecedent_from_coreferee(pronoun_token, doc) -> Optional[str]:
+    """Resolve a pronoun token via coreferee chains (first non-pronoun mention)."""
+    chains = doc._.coref_chains
+    if chains is None:
+        return None
+    mentions = chains.resolve(pronoun_token)
+    if not mentions:
+        return None
+    for mention in mentions:
+        if mention.i == pronoun_token.i:
+            continue
+        span = mention.doc[mention.i : mention.i + 1]
+        # Expand to noun chunk when possible
+        for chunk in mention.doc.noun_chunks:
+            if mention.i >= chunk.start and mention.i < chunk.end:
+                if chunk.root.pos_ != "PRON":
+                    return chunk.text.strip()
+        if mention.pos_ != "PRON":
+            return mention.text.strip()
+    return None
+
+
+def _resolve_model(
+    triplets: Iterable[Triplet],
+    knowledge_text: str,
+    nlp,
+) -> List[Triplet]:
+    """Resolve pronouns using the optional coreferee spaCy component."""
+    nlp = _ensure_coreferee(nlp)
+    doc = nlp(knowledge_text)
+    resolved: List[Triplet] = []
+
+    for triplet in triplets:
+        if not _head_starts_with_pronoun(triplet.head):
+            resolved.append(triplet)
+            continue
+
+        pronoun_text = triplet.head.strip().split()[0].lower().strip(".,;:!?'\"()[]{}")
+        replacement: Optional[str] = None
+
+        for sent in doc.sents:
+            if pronoun_text not in sent.text.lower():
+                continue
+            for token in sent:
+                if token.text.lower() == pronoun_text and token.pos_ == "PRON":
+                    replacement = _antecedent_from_coreferee(token, doc)
+                    if replacement:
+                        break
+            if replacement:
+                break
+
+        if replacement is None:
+            resolved.append(triplet)
+            continue
+
+        remainder = " ".join(triplet.head.strip().split()[1:])
+        new_head = f"{replacement} {remainder}".strip()
+        resolved.append(Triplet(head=new_head, relation=triplet.relation, tail=triplet.tail))
+
+    return resolved
+
+
+def resolve_coreferences(
+    triplets: Iterable[Triplet],
+    knowledge_text: str,
+    nlp=None,
+    backend: str = "heuristic",
+) -> List[Triplet]:
+    """Replace pronoun heads with antecedent noun phrases.
+
+    Parameters
+    ----------
+    backend:
+        ``heuristic`` — sentence-local search (default, no extra deps).
+        ``model`` — coreferee spaCy component (``pip install coreferee``).
+    """
+    if nlp is None:
+        import spacy
+
+        nlp = spacy.load("en_core_web_sm")
+
+    if backend == "heuristic":
+        return _resolve_heuristic(triplets, knowledge_text, nlp)
+    if backend == "model":
+        try:
+            return _resolve_model(triplets, knowledge_text, nlp)
+        except ImportError:
+            logger.warning("coreferee unavailable; falling back to heuristic coreference")
+            return _resolve_heuristic(triplets, knowledge_text, nlp)
+    raise ValueError(f"Unsupported coreference backend: {backend}")

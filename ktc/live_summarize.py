@@ -53,6 +53,32 @@ def _parse_sentences(raw: str) -> List[str]:
     return lines
 
 
+def _summarize_one_source(
+    query: str,
+    result: SearchResult,
+    config: LiveRetrievalConfig,
+    client,
+) -> List[str]:
+    """Summarize a single source; returns sentence strings (no URL attribution here)."""
+    user_prompt = (
+        f"Search query: {query}\n\n"
+        "Summarize only what this source states that helps answer the query.\n\n"
+        f"Source ({result.domain}):\n"
+        f"Title: {result.title}\n"
+        f"Text: {result.snippet}"
+    )
+    response = client.chat.completions.create(
+        model=config.llm_model,
+        messages=[
+            {"role": "system", "content": SUMMARIZE_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.0,
+        max_tokens=200,
+    )
+    return _parse_sentences((response.choices[0].message.content or "").strip())
+
+
 def summarize_search_results(
     query: str,
     results: List[SearchResult],
@@ -68,45 +94,30 @@ def summarize_search_results(
         logger.warning("LLM_API_KEY not set; skipping summarization for query=%r", query)
         return []
 
-    if budget is not None and not budget.can_call():
-        logger.warning("API call budget exhausted; skipping summarization for query=%r", query)
-        return []
-
-    source_blocks = []
-    for i, result in enumerate(results[:5], 1):
-        source_blocks.append(
-            f"Source {i} ({result.domain}):\nTitle: {result.title}\nURL: {result.url}\nText: {result.snippet}"
-        )
-    user_prompt = (
-        f"Search query: {query}\n\n"
-        "Summarize only what these sources state that helps answer the query.\n\n"
-        + "\n\n".join(source_blocks)
-    )
-
     try:
         from openai import OpenAI
-
-        if budget is not None:
-            budget.record(1)
-
-        client = OpenAI(api_key=api_key)
-        response = client.chat.completions.create(
-            model=config.llm_model,
-            messages=[
-                {"role": "system", "content": SUMMARIZE_SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.0,
-            max_tokens=400,
-        )
-        raw = (response.choices[0].message.content or "").strip()
-        sentences = _parse_sentences(raw)
-        if not sentences:
-            return []
-
-        # Attribute each sentence to the first source (batch summary); URL per result when single source
-        primary_url = results[0].url
-        return [LiveKnowledgeSentence(sentence=s, source_url=primary_url, query=query) for s in sentences]
-    except Exception as exc:
-        logger.warning("live_summarize_failed query=%r error=%s", query, exc)
+    except ImportError:
+        logger.warning("openai package not installed; skipping summarization for query=%r", query)
         return []
+
+    client = OpenAI(api_key=api_key)
+    attributed: List[LiveKnowledgeSentence] = []
+
+    for result in results[: config.results_per_query]:
+        if budget is not None and not budget.can_call():
+            logger.warning("API call budget exhausted; skipping remaining summarization for query=%r", query)
+            break
+        try:
+            if budget is not None:
+                budget.record(1)
+            sentences = _summarize_one_source(query, result, config, client)
+            for sentence in sentences:
+                attributed.append(
+                    LiveKnowledgeSentence(sentence=sentence, source_url=result.url, query=query)
+                )
+        except Exception as exc:
+            logger.warning(
+                "live_summarize_failed query=%r url=%s error=%s", query, result.url, exc
+            )
+
+    return attributed
