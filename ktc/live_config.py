@@ -22,6 +22,7 @@ class LiveRetrievalConfig:
     results_per_query: int = 5
     search_provider: str = "tavily"
     llm_model: str = "gpt-4o-mini"
+    llm_api_base: str = ""
     estimated_cost_per_dialogue_usd: float = 0.03
     trusted_domains: List[str] = field(default_factory=list)
     config_path: Path = field(default_factory=lambda: DEFAULT_CONFIG_PATH)
@@ -57,6 +58,7 @@ class LiveRetrievalConfig:
             results_per_query=int(data.get("results_per_query", 5)),
             search_provider=str(data.get("search_provider", "tavily")),
             llm_model=str(data.get("llm_model", "gpt-4o-mini")),
+            llm_api_base=str(data.get("llm_api_base", "") or ""),
             estimated_cost_per_dialogue_usd=float(data.get("estimated_cost_per_dialogue_usd", 0.03)),
             trusted_domains=sorted(set(trusted)),
             config_path=config_path,

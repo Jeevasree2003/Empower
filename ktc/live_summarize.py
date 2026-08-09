@@ -53,6 +53,18 @@ def _parse_sentences(raw: str) -> List[str]:
     return lines
 
 
+def _make_llm_client(config: LiveRetrievalConfig):
+    """Build an OpenAI-compatible client (OpenAI, Groq, etc.)."""
+    from openai import OpenAI
+
+    api_key = os.environ.get("LLM_API_KEY", "").strip()
+    base_url = os.environ.get("LLM_API_BASE", "").strip() or (config.llm_api_base or "").strip()
+    kwargs = {"api_key": api_key}
+    if base_url:
+        kwargs["base_url"] = base_url
+    return OpenAI(**kwargs)
+
+
 def _summarize_one_source(
     query: str,
     result: SearchResult,
@@ -95,12 +107,12 @@ def summarize_search_results(
         return []
 
     try:
-        from openai import OpenAI
+        from openai import OpenAI  # noqa: F401 — checked by _make_llm_client
     except ImportError:
         logger.warning("openai package not installed; skipping summarization for query=%r", query)
         return []
 
-    client = OpenAI(api_key=api_key)
+    client = _make_llm_client(config)
     attributed: List[LiveKnowledgeSentence] = []
 
     for result in results[: config.results_per_query]:

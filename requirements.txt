@@ -9,9 +9,10 @@ sentence-transformers
 numpy
 pyyaml
 requests
+python-dotenv
 
 # Live retrieval + summarization (hybrid knowledge path)
-# openai
+openai
 
 # After install, download spaCy model:
 # python -m spacy download en_core_web_sm

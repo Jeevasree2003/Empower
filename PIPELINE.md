@@ -4,6 +4,32 @@ This document mirrors the expected project pipeline for reproducing
 **EMPOWER-KARE: Deep Prompt Learning for Knowledge-Aware Response Generation in
 Clinical Counseling and Legal Support Conversations** (IEEE TAI, 2026).
 
+## Setup
+
+For **hybrid live knowledge retrieval** (optional API calls in `ktc/live_retrieval.py` and
+`ktc/live_summarize.py`), copy the example env file and add your keys locally:
+
+```bash
+cp .env.example .env
+# Edit .env and replace placeholders with real keys
+```
+
+- `.env` is listed in `.gitignore` and is **never committed** — safe for secrets.
+- Keys are read via `os.environ` (`LIVE_SEARCH_API_KEY`, `LLM_API_KEY`, optional `LLM_API_BASE`).
+- Summarization uses an **OpenAI-compatible client** pointed at Groq by default
+  (`llm_api_base: https://api.groq.com/openai/v1`, `llm_model: llama-3.3-70b-versatile` in
+  `config/live_retrieval_config.yaml`). Set `LLM_API_KEY` to your Groq API key.
+- Entry scripts call `load_dotenv()` **before** importing `ktc` live modules, so the
+  environment is populated when `LiveRetrievalConfig.load()` or `search_allowlisted()` run.
+- Standard preprocessing (`scripts/preprocess_kare.py`) uses static KTC by default; live
+  retrieval only runs when `run_hybrid(enable_live=True)` is used with keys present.
+
+Install dependencies (includes `python-dotenv`):
+
+```bash
+pip install -r requirements.txt
+```
+
 ## Dataset
 
 - **Full dataset:** https://www.iitp.ac.in/~ai-nlp-ml/resources/data/KARE.zip

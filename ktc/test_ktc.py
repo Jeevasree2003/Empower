@@ -293,6 +293,11 @@ class TestLiveConfig(unittest.TestCase):
         self.assertTrue(all(d == d.lower() for d in config.trusted_domains))
         self.assertIn("icallhelpline.org", config.trusted_domains)
 
+    def test_groq_llm_api_base_from_config(self):
+        config = LiveRetrievalConfig.load()
+        self.assertEqual(config.llm_model, "llama-3.3-70b-versatile")
+        self.assertEqual(config.llm_api_base, "https://api.groq.com/openai/v1")
+
     def test_api_call_budget(self):
         budget = ApiCallBudget(2)
         self.assertTrue(budget.can_call())
