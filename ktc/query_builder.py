@@ -40,12 +40,57 @@ _CANONICAL_QUERY_PHRASES: Dict[str, str] = {
     "abuse": "domestic abuse or violence",
 }
 
+# IPC section numbers for indiacode retrieval (see PIPELINE.md — operative law is BNS
+# since July 2024; IPC retained here for search hooks validated against indiacode.nic.in).
+_CRIME_IPC_SECTION: Dict[str, str] = {
+    "rape": "376",
+    "murder": "302",
+    "murder or homicide threat": "302",
+    "homicide": "302",
+    "criminal intimidation": "506",
+}
+
+# Legal entities that mean "lodge/FIR" procedure, not abstract definitions.
+_FIR_PROCEDURE_ENTITIES = frozenset({"complaint", "complaints", "fir", "police complaint"})
+
 
 def _canonical_phrase(entity: str, category: str) -> str:
     key = entity.strip().lower()
     if key in _CANONICAL_QUERY_PHRASES:
         return _CANONICAL_QUERY_PHRASES[key]
     return entity.strip()
+
+
+def _ipc_section_for_crime(entity: str) -> Optional[str]:
+    key = entity.strip().lower()
+    if key in _CRIME_IPC_SECTION:
+        return _CRIME_IPC_SECTION[key]
+    for crime, section in _CRIME_IPC_SECTION.items():
+        if crime in key or key in crime:
+            return section
+    return None
+
+
+def _crime_report_query_text(entity: str) -> str:
+    """Build crime_report_india query; avoid leading 'How to' for murder (Tavily misfire)."""
+    lower = entity.lower()
+    if "murder" in lower or "homicide" in lower:
+        return (
+            f"murder homicide offence India police FIR filing procedure official {CURRENT_YEAR}"
+        )
+    return f"How to report {entity} in India official procedure {CURRENT_YEAR}"
+
+
+def _crime_statute_indiacode_query(entity: str) -> Optional[SearchQuery]:
+    section = _ipc_section_for_crime(entity)
+    if not section:
+        return None
+    return SearchQuery(
+        f"IPC Section {section} indiacode.nic.in {entity} India",
+        entity,
+        CATEGORY_CRIME,
+        "crime_statute_indiacode",
+    )
 
 
 @dataclass
@@ -73,12 +118,15 @@ def _crime_queries(entity: str, medium: Optional[str] = None) -> List[SearchQuer
             "crime_definition",
         ),
         SearchQuery(
-            f"How to report {entity} in India official procedure {CURRENT_YEAR}",
+            _crime_report_query_text(entity),
             entity,
             CATEGORY_CRIME,
             "crime_report_india",
         ),
     ]
+    statute = _crime_statute_indiacode_query(entity)
+    if statute is not None:
+        queries.append(statute)
     if medium:
         queries.append(
             SearchQuery(
@@ -154,6 +202,22 @@ def _legal_queries(entity: str) -> List[SearchQuery]:
                 entity,
                 CATEGORY_LEGAL,
                 "legal_section_punishment",
+            ),
+        ]
+    lower = entity.strip().lower()
+    if lower in _FIR_PROCEDURE_ENTITIES:
+        return [
+            SearchQuery(
+                f"CrPC Section 154 information police station FIR procedure India indiacode {CURRENT_YEAR}",
+                entity,
+                CATEGORY_LEGAL,
+                "legal_fir_procedure",
+            ),
+            SearchQuery(
+                f"latest official helpline for filing police complaint in India {CURRENT_YEAR}",
+                entity,
+                CATEGORY_LEGAL,
+                "legal_helpline",
             ),
         ]
     return [

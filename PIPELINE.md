@@ -91,6 +91,57 @@ python scripts/preprocess_kare.py --verbalization_backend llm
 Template verbalization produces fluent single sentences rather than naive
 `head + relation + tail` concatenation.
 
+### Live retrieval query policy (Stage 0.5)
+
+Decisions for `ktc/query_builder.py` — documented before hardcoding crime→section
+mappings or changing legal templates.
+
+#### IPC vs BNS section numbering
+
+**Decision: use IPC section numbers for `crime_statute_indiacode` retrieval queries.**
+
+India's Bharatiya Nyaya Sanhita (BNS) replaced most IPC offences on **1 July 2024**
+(BNSS replaced CrPC for procedure). BNS is the operative code for new cases.
+
+We still target **IPC** in search queries because:
+
+1. **Empirical retrieval** — empty-retrieval diagnosis (Aug 2026) showed Tavily +
+   `indiacode.nic.in` reliably returns allowlisted hits for queries like
+   `IPC Section 376 indiacode.nic.in` and `IPC Section 302 indiacode.nic.in`; BNS
+   section probes were not equivalently indexed at the time of testing.
+2. **India Code URL structure** — penal statute pages on indiacode.nic.in still use IPC
+   act IDs and section ordinals in `show-data` URLs (e.g. Sections 375/376, 302).
+3. **Counselor-facing use** — retrieved sentences support victim counseling, not court
+   filings; IPC labels remain widely recognized in training data and public discourse.
+
+**Future:** add parallel `crime_statute_bns` templates once indiacode BNS pages are
+verified to rank in Tavily top results (e.g. BNS §63 rape, §103 murder). Do not mix
+IPC and BNS section numbers in a single query string.
+
+| Offence (canonical) | IPC (retrieval) | BNS (in force; not used in queries yet) |
+|---------------------|-----------------|----------------------------------------|
+| rape                | 376             | 63                                     |
+| murder              | 302             | 103                                    |
+| criminal intimidation | 506           | 351                                    |
+
+#### Legal entity `complaint` (dialogue 245)
+
+**Decision: target CrPC Section 154 (FIR / information to police), not a generic
+definitional query.**
+
+Dialogue 245 victim text: *"I need help to lodge a complaint"* — procedural intent to
+file with police, not *"what is a legal complaint?"* as an abstract concept. The
+failed `legal_general` template surfaced consumer-court blogs and indiankanoon, not
+government procedure.
+
+Use template `legal_fir_procedure` with CrPC §154 / police-station wording for
+`complaint` (and close variants). BNSS §173 is the BNS-era analogue; same IPC-style
+retrieval rationale applies — CrPC §154 for indiacode hooks until BNSS indexing is
+verified.
+
+`crime_report_india` is **kept alongside** `crime_statute_indiacode` (supplement, not
+replacement) so eval scripts can compare both templates.
+
 Run KTC tests:
 
 ```bash

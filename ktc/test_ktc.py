@@ -9,7 +9,7 @@ from unittest import mock
 import numpy as np
 
 from ktc.coreference import resolve_coreferences
-from ktc.entity_extraction import CATEGORY_CRIME, CATEGORY_MENTAL_HEALTH, extract_entities
+from ktc.entity_extraction import CATEGORY_CRIME, CATEGORY_LEGAL, CATEGORY_MENTAL_HEALTH, extract_entities
 from ktc.extraction import _relation_span, extract_triplets
 from ktc.filtering import passes_filters
 from ktc.knowledge_item import KnowledgeCandidate
@@ -372,6 +372,8 @@ class TestLiveRetrieval(unittest.TestCase):
 
     @mock.patch("requests.get")
     def test_fetch_page_text_uses_url_cache(self, mock_get):
+        import uuid
+
         from ktc.live_retrieval import DEFAULT_CACHE_DIR, fetch_page_text
 
         mock_get.return_value = mock.MagicMock(
@@ -379,7 +381,7 @@ class TestLiveRetrieval(unittest.TestCase):
             text="<html><main><p>Helpline number 9152987821 listed for crisis support.</p></main></html>",
         )
         mock_get.return_value.raise_for_status = mock.MagicMock()
-        url = "https://vandrevala.org/test-cache-page"
+        url = f"https://vandrevala.org/test-cache-page-{uuid.uuid4().hex}"
         cache_dir = DEFAULT_CACHE_DIR / "pages_test"
         first = fetch_page_text(url, cache_dir=cache_dir, cache_ttl_days=30)
         second = fetch_page_text(url, cache_dir=cache_dir, cache_ttl_days=30)
@@ -564,6 +566,32 @@ class TestEntityExtraction(unittest.TestCase):
         texts = " ".join(q.text.lower() for q in queries)
         self.assertIn("helpline", texts)
         self.assertIn("suicide", texts)
+
+    def test_crime_statute_indiacode_supplements_report(self):
+        entities = [{"text": "rape", "category": CATEGORY_CRIME}]
+        queries = build_queries(entities, max_queries=3)
+        templates = {q.template for q in queries}
+        self.assertIn("crime_definition", templates)
+        self.assertIn("crime_report_india", templates)
+        self.assertIn("crime_statute_indiacode", templates)
+        statute = next(q for q in queries if q.template == "crime_statute_indiacode")
+        self.assertIn("376", statute.text)
+        self.assertIn("indiacode", statute.text.lower())
+
+    def test_murder_report_avoids_how_to_prefix(self):
+        entities = [{"text": "murder", "category": CATEGORY_CRIME}]
+        queries = build_queries(entities, max_queries=3)
+        report = next(q for q in queries if q.template == "crime_report_india")
+        self.assertFalse(report.text.lower().startswith("how to"))
+
+    def test_complaint_uses_fir_procedure_template(self):
+        entities = [{"text": "complaint", "category": CATEGORY_LEGAL}]
+        queries = build_queries(entities, max_queries=2)
+        templates = {q.template for q in queries}
+        self.assertIn("legal_fir_procedure", templates)
+        self.assertNotIn("legal_general", templates)
+        fir = next(q for q in queries if q.template == "legal_fir_procedure")
+        self.assertIn("154", fir.text)
 
 
 if __name__ == "__main__":
