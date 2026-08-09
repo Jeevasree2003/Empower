@@ -112,7 +112,7 @@ def stage_live_retrieval(dialogue_ids: list[str], input_path: Path, config: Live
             results = search_allowlisted(query.text, config, budget=budget)
             if not results:
                 print(f"  Query: {query.text}")
-                print("    → (no allowlisted results)")
+                print("    -> (no allowlisted results)")
                 continue
             summaries = summarize_search_results(query.text, results, config, budget=budget)
             for result in results[:3]:
@@ -134,10 +134,14 @@ def stage_merged_turn(dialogue_id: str, input_path: Path, pipeline: KnowledgeTri
     static_only = pipeline.run_hybrid(knowledge, history, enable_live=False)
     hybrid = pipeline.run_hybrid(knowledge, history, enable_live=True)
 
+    live_in_top = any(c.source == "live_api" for c in hybrid.ranked_candidates[:12])
+
     print(f"\nVictim: {victim!r}")
     print(f"Agent (gold): {agent_response!r}")
     print(f"\nTop-1 similarity — static only: {static_only.top1_similarity_score:.4f}")
     print(f"Top-1 similarity — hybrid:      {hybrid.top1_similarity_score:.4f}")
+    delta = hybrid.top1_similarity_score - static_only.top1_similarity_score
+    print(f"Delta: {delta:+.4f} | live_api in top-12: {live_in_top}")
 
     print("\n--- STATIC ONLY (top 8) ---")
     for i, c in enumerate(static_only.ranked_candidates[:8], 1):
@@ -168,6 +172,11 @@ def main():
     )
     parser.add_argument("--stage", choices=["all", "entities", "queries", "live", "merge"], default="all")
     args = parser.parse_args()
+    # Accept both space-separated and comma-separated dialogue IDs.
+    expanded_ids: list[str] = []
+    for item in args.dialogue_ids:
+        expanded_ids.extend(part.strip() for part in item.split(",") if part.strip())
+    args.dialogue_ids = expanded_ids or list(args.dialogue_ids)
 
     config = LiveRetrievalConfig.load()
     import spacy
@@ -182,7 +191,11 @@ def main():
     if args.stage in {"all", "live"}:
         stage_live_retrieval(args.dialogue_ids, args.input, config, nlp)
     if args.stage in {"all", "merge"}:
-        stage_merged_turn(args.merge_dialogue_id, args.input, pipeline)
+        merge_ids = args.dialogue_ids if args.stage == "all" else [args.merge_dialogue_id]
+        if args.stage == "merge" and args.merge_dialogue_id not in merge_ids:
+            merge_ids = [args.merge_dialogue_id]
+        for did in merge_ids:
+            stage_merged_turn(did, args.input, pipeline)
 
     print("\n" + "=" * 72)
     print("COST ESTIMATE (at default config limits)")

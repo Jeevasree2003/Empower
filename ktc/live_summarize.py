@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 from ktc.live_config import ApiCallBudget, LiveRetrievalConfig
-from ktc.live_retrieval import SearchResult
+from ktc.live_retrieval import SearchResult, enrich_search_result
 
 logger = logging.getLogger(__name__)
 
@@ -19,12 +19,22 @@ SUMMARIZE_SYSTEM_PROMPT = """You convert trusted web source excerpts into factua
 
 Hard rules (violations are unacceptable):
 1. Only state facts explicitly present in the provided source text. Never infer, extrapolate, or add outside knowledge.
-2. Output short, single-fact sentences in plain English (one fact per line if multiple).
-3. If the source does not clearly answer the search query, output exactly: NO_RELEVANT_INFO
+2. Output short, single-fact sentences in plain, conversational English — phrased the way a trained support agent would share information in chat (e.g. "There is a helpline number listed: 9152987821" or "The National Mental Health Programme provides care at primary health centres"), NOT encyclopedic or statistical prose (avoid "WHO estimates that...", "DALYs per 100 000 population", or "economic loss is estimated at").
+3. If the source contains NO facts relevant to the query, output exactly one line: NO_RELEVANT_INFO
+   If the source contains some relevant facts but not the full answer, output only the relevant facts and do NOT write NO_RELEVANT_INFO.
 4. Never phrase output as advice or commands. Do not write "you should", "you must", or "contact X immediately".
-   Instead write factual statements: "Section X states that...", "The helpline number listed is...", "The portal URL is..."
+   Instead write factual statements: "Section X states that...", "The helpline number listed is...", "The portal name is..."
 5. Do not include URLs in the sentence text; source URLs are tracked separately.
+6. WHO and government pages often use general language. Treat programme names, helpline numbers, legal definitions, portal names, and reporting options as valid facts when present in the source.
+7. Never output meta-commentary about the source (e.g. "the source does not provide", "this page does not mention").
 """
+
+_SHORT_FACT_MIN_LEN = 8
+_PHONE_PATTERN = re.compile(r"\d{3,}")
+_META_COMMENTARY_PATTERN = re.compile(
+    r"(the source does not|this page does not|no information is provided|the text does not mention)",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -41,14 +51,35 @@ class LiveKnowledgeSentence:
         }
 
 
+def _is_meta_commentary(line: str) -> bool:
+    return bool(_META_COMMENTARY_PATTERN.search(line))
+
+
+def _is_short_fact(line: str) -> bool:
+    return len(line) >= _SHORT_FACT_MIN_LEN and bool(_PHONE_PATTERN.search(line))
+
+
 def _parse_sentences(raw: str) -> List[str]:
-    if NO_RELEVANT_INFO in raw.upper().replace(" ", "_"):
+    text = raw.strip()
+    if not text:
         return []
-    lines = []
-    for line in raw.splitlines():
+
+    normalized = re.sub(r"\s+", "_", text.upper())
+    if normalized in {NO_RELEVANT_INFO, f"{NO_RELEVANT_INFO}."}:
+        return []
+
+    lines: List[str] = []
+    for line in text.splitlines():
         line = line.strip()
         line = re.sub(r"^[-*\d.]+\s*", "", line)
-        if len(line) > 20:
+        if not line:
+            continue
+        line_norm = line.upper().replace(" ", "_")
+        if line_norm == NO_RELEVANT_INFO or line_norm.startswith(f"{NO_RELEVANT_INFO}_"):
+            continue
+        if _is_meta_commentary(line):
+            continue
+        if len(line) > 20 or _is_short_fact(line):
             lines.append(line)
     return lines
 
@@ -122,7 +153,8 @@ def summarize_search_results(
         try:
             if budget is not None:
                 budget.record(1)
-            sentences = _summarize_one_source(query, result, config, client)
+            enriched = enrich_search_result(result, cache_ttl_days=config.cache_ttl_days)
+            sentences = _summarize_one_source(query, enriched, config, client)
             for sentence in sentences:
                 attributed.append(
                     LiveKnowledgeSentence(sentence=sentence, source_url=result.url, query=query)

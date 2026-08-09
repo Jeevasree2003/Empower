@@ -9,7 +9,7 @@ from unittest import mock
 import numpy as np
 
 from ktc.coreference import resolve_coreferences
-from ktc.entity_extraction import CATEGORY_CRIME, extract_entities
+from ktc.entity_extraction import CATEGORY_CRIME, CATEGORY_MENTAL_HEALTH, extract_entities
 from ktc.extraction import _relation_span, extract_triplets
 from ktc.filtering import passes_filters
 from ktc.knowledge_item import KnowledgeCandidate
@@ -286,6 +286,45 @@ class TestRanking(unittest.TestCase):
         self.assertIn("live_api", sources)
         self.assertEqual(result.candidates[0].source, "live_api")
 
+    def test_cross_encoder_reranker_uses_biencoder_shortlist(self):
+        from ktc.ranking import CrossEncoderReranker, SentenceBertRanker
+
+        pool = [
+            KnowledgeCandidate(text="irrelevant fraud scam", source="static_dataset"),
+            KnowledgeCandidate(
+                text="domestic violence helpline number India official",
+                source="live_api",
+                url="https://ncw.nic.in/x",
+            ),
+            KnowledgeCandidate(text="unrelated static text", source="static_dataset"),
+        ]
+
+        class _MockBi(SentenceBertRanker):
+            def __init__(self):
+                pass
+
+            def rank_candidates_with_scores(self, dialog_history, candidates, top_k=26):
+                from ktc.ranking import CandidateRankingResult
+
+                cl = list(candidates)
+                scores = [0.9 if c.source == "live_api" else 0.1 for c in cl]
+                order = _stable_rank_order(np.array(scores), top_k)
+                ranked = [cl[i] for i in order]
+                ranked_scores = [scores[i] for i in order]
+                return CandidateRankingResult(ranked, ranked_scores, ranked_scores[0])
+
+        class _MockCE:
+            def predict(self, pairs):
+                return [2.0 if "helpline" in b else -1.0 for _a, b in pairs]
+
+        reranker = CrossEncoderReranker.__new__(CrossEncoderReranker)
+        reranker.bi_encoder = _MockBi()
+        reranker.cross_encoder = _MockCE()
+        reranker.retrieve_top_n = 32
+
+        result = reranker.rank_candidates_with_scores("domestic violence threat", pool, top_k=2)
+        self.assertEqual(result.candidates[0].source, "live_api")
+
 
 class TestLiveConfig(unittest.TestCase):
     def test_trusted_domains_lowercased_at_load(self):
@@ -331,8 +370,89 @@ class TestLiveRetrieval(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertIn("cybercrime.gov.in", results[0].domain)
 
+    @mock.patch("requests.get")
+    def test_fetch_page_text_uses_url_cache(self, mock_get):
+        from ktc.live_retrieval import DEFAULT_CACHE_DIR, fetch_page_text
+
+        mock_get.return_value = mock.MagicMock(
+            status_code=200,
+            text="<html><main><p>Helpline number 9152987821 listed for crisis support.</p></main></html>",
+        )
+        mock_get.return_value.raise_for_status = mock.MagicMock()
+        url = "https://vandrevala.org/test-cache-page"
+        cache_dir = DEFAULT_CACHE_DIR / "pages_test"
+        first = fetch_page_text(url, cache_dir=cache_dir, cache_ttl_days=30)
+        second = fetch_page_text(url, cache_dir=cache_dir, cache_ttl_days=30)
+        self.assertIn("9152987821", first)
+        self.assertEqual(first, second)
+        mock_get.assert_called_once()
+
 
 class TestLiveSummarize(unittest.TestCase):
+    def test_parse_sentences_mixed_no_relevant_info_keeps_valid_lines(self):
+        from ktc.live_summarize import _parse_sentences
+
+        raw = (
+            "The portal cybercrime.gov.in has an option to report a crime.\n"
+            "The helpline number listed for financial cyber fraud is 1930.\n"
+            "NO_RELEVANT_INFO on the official procedure for reporting murder or homicide threats in India."
+        )
+        parsed = _parse_sentences(raw)
+        self.assertEqual(len(parsed), 2)
+        self.assertIn("report a crime", parsed[0])
+        self.assertIn("1930", parsed[1])
+
+    def test_parse_sentences_pure_no_relevant_info_returns_empty(self):
+        from ktc.live_summarize import _parse_sentences
+
+        self.assertEqual(_parse_sentences("NO_RELEVANT_INFO"), [])
+        self.assertEqual(_parse_sentences("  NO_RELEVANT_INFO  "), [])
+
+    def test_parse_sentences_keeps_short_helpline_facts(self):
+        from ktc.live_summarize import _parse_sentences
+
+        parsed = _parse_sentences("Helpline number is 1930.")
+        self.assertEqual(len(parsed), 1)
+        self.assertIn("1930", parsed[0])
+
+    def test_parse_sentences_filters_meta_commentary(self):
+        from ktc.live_summarize import _parse_sentences
+
+        meta_examples = [
+            "The source does not provide the actual definition of domestic violence in the given text.",
+            "This page does not mention any helpline numbers.",
+            "No information is provided about reporting procedures.",
+            "The text does not mention suicide prevention resources.",
+        ]
+        for line in meta_examples:
+            self.assertEqual(_parse_sentences(line), [], msg=line)
+
+    def test_parse_sentences_keeps_valid_facts_while_dropping_meta(self):
+        from ktc.live_summarize import _parse_sentences
+
+        raw = (
+            "Section 506 of the Indian law deals with punishment for criminal intimidation.\n"
+            "The source does not provide the actual definition of domestic violence in the given text.\n"
+            "The helpline number listed for financial cyber fraud is 1930."
+        )
+        parsed = _parse_sentences(raw)
+        self.assertEqual(len(parsed), 2)
+        self.assertIn("Section 506", parsed[0])
+        self.assertIn("1930", parsed[1])
+
+    def test_parse_sentences_keeps_dialogue_100_style_facts(self):
+        from ktc.live_summarize import _parse_sentences
+
+        facts = [
+            "The World Health Organization estimates the age-adjusted suicide rate per 100 000 population in India is 21.1.",
+            "The burden of mental health problems in India is 2443 disability-adjusted life years (DALYs) per 100 000 population.",
+            "The economic loss due to mental health conditions in India, between 2012-2030, is estimated at USD 1.03 trillion.",
+            "Policy makers are encouraged to promote availability of and access to cost-effective treatment of common mental disorders at the primary health care level.",
+        ]
+        for fact in facts:
+            parsed = _parse_sentences(fact)
+            self.assertEqual(parsed, [fact], msg=fact)
+
     def test_per_source_attribution(self):
         import sys
 
@@ -434,6 +554,16 @@ class TestEntityExtraction(unittest.TestCase):
         self.assertGreaterEqual(len(queries), 1)
         for q in queries:
             self.assertGreaterEqual(len(q.text.split()), 4)
+
+    def test_crisis_entities_get_helpline_queries(self):
+        entities = [{"text": "dying", "category": CATEGORY_MENTAL_HEALTH}]
+        queries = build_queries(entities, max_queries=3)
+        templates = {q.template for q in queries}
+        self.assertIn("mh_crisis_helpline", templates)
+        self.assertIn("mh_crisis_support", templates)
+        texts = " ".join(q.text.lower() for q in queries)
+        self.assertIn("helpline", texts)
+        self.assertIn("suicide", texts)
 
 
 if __name__ == "__main__":

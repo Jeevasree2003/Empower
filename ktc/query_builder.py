@@ -91,21 +91,53 @@ def _crime_queries(entity: str, medium: Optional[str] = None) -> List[SearchQuer
     return queries
 
 
-def _mental_health_queries(entity: str) -> List[SearchQuery]:
-    return [
-        SearchQuery(
-            f"What are the symptoms of {entity}?",
-            entity,
-            CATEGORY_MENTAL_HEALTH,
-            "mh_symptoms",
-        ),
+_CRISIS_RAW_TERMS = frozenset({"dying", "suicidal", "suicide", "insane", "hopeless", "kill myself", "end my life"})
+
+
+def _is_crisis_entity(raw_text: str, canonical: str) -> bool:
+    combined = f"{raw_text} {canonical}".lower()
+    if any(term in combined for term in _CRISIS_RAW_TERMS):
+        return True
+    return "suicidal" in combined or "ideation" in combined
+
+
+def _mental_health_queries(entity: str, raw_entity: str = "") -> List[SearchQuery]:
+    queries: List[SearchQuery] = []
+    if _is_crisis_entity(raw_entity, entity):
+        queries.extend(
+            [
+                SearchQuery(
+                    f"24/7 suicide prevention helpline number India {CURRENT_YEAR}",
+                    entity,
+                    CATEGORY_MENTAL_HEALTH,
+                    "mh_crisis_helpline",
+                ),
+                SearchQuery(
+                    f"mental health crisis support helpline India {CURRENT_YEAR}",
+                    entity,
+                    CATEGORY_MENTAL_HEALTH,
+                    "mh_crisis_support",
+                ),
+            ]
+        )
+    else:
+        queries.append(
+            SearchQuery(
+                f"What are the symptoms of {entity}?",
+                entity,
+                CATEGORY_MENTAL_HEALTH,
+                "mh_symptoms",
+            )
+        )
+    queries.append(
         SearchQuery(
             f"current treatment for {entity} in India {CURRENT_YEAR}",
             entity,
             CATEGORY_MENTAL_HEALTH,
             "mh_treatment",
-        ),
-    ]
+        )
+    )
+    return queries
 
 
 def _legal_queries(entity: str) -> List[SearchQuery]:
@@ -178,7 +210,7 @@ def build_queries(
         if category == CATEGORY_CRIME:
             built.extend(_crime_queries(text, medium=primary_medium))
         elif category == CATEGORY_MENTAL_HEALTH:
-            built.extend(_mental_health_queries(text))
+            built.extend(_mental_health_queries(text, raw_entity=raw_text))
         elif category == CATEGORY_LEGAL:
             built.extend(_legal_queries(text))
         elif category == CATEGORY_MEDIUM:

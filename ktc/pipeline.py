@@ -13,7 +13,7 @@ from ktc.filtering import filter_triplets
 from ktc.knowledge_item import KnowledgeCandidate
 from ktc.live_config import ApiCallBudget, LiveRetrievalConfig
 from ktc.live_knowledge import fetch_live_knowledge, static_candidates_from_triplets, victim_utterance_from_history
-from ktc.ranking import SentenceBertRanker, rank_candidates, rank_triplets
+from ktc.ranking import CandidateRanker, SentenceBertRanker, rank_candidates, rank_triplets
 from ktc.triplet import Triplet
 from ktc.verbalization import verbalize_template, verbalize_triplets
 
@@ -34,7 +34,7 @@ class KnowledgeTripletPipeline:
     openie_backend: str = "spacy"
     coref_backend: str = "heuristic"
     verbalization_backend: str = "template"
-    ranker: Optional[SentenceBertRanker] = field(default=None, repr=False)
+    ranker: Optional[CandidateRanker] = field(default=None, repr=False)
     _nlp: Optional[object] = field(default=None, repr=False)
     _knowledge_cache: Dict[str, List[Triplet]] = field(default_factory=dict, repr=False)
     live_config: LiveRetrievalConfig = field(default_factory=LiveRetrievalConfig.load)
@@ -51,7 +51,7 @@ class KnowledgeTripletPipeline:
             self._nlp = spacy.load("en_core_web_sm")
         return self._nlp
 
-    def _get_ranker(self) -> SentenceBertRanker:
+    def _get_ranker(self) -> CandidateRanker:
         if self.ranker is None:
             self.ranker = SentenceBertRanker()
         return self.ranker

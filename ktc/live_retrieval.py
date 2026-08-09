@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -73,6 +75,123 @@ def _write_cache(path: Path, results: List[SearchResult]) -> None:
         "results": [r.to_dict() for r in results],
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _normalize_whitespace(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _snippet_needs_enrichment(snippet: str) -> bool:
+    """True when Tavily snippet is too thin or looks like nav/boilerplate."""
+    text = snippet.strip()
+    if len(text) < 500:
+        return True
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    nav_markers = sum(
+        1
+        for line in lines
+        if line.startswith("+")
+        or line.lower() in {"login", "register as a volunteer"}
+        or "banner" in line.lower()
+    )
+    return nav_markers >= 3
+
+
+def _page_cache_path(url: str, cache_dir: Path) -> Path:
+    digest = hashlib.sha256(url.encode("utf-8")).hexdigest()
+    return cache_dir / "pages" / f"{digest}.json"
+
+
+def _read_page_cache(path: Path, ttl_days: int) -> Optional[str]:
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        fetched_at = datetime.fromisoformat(payload["fetched_at"])
+        age_days = (datetime.now(timezone.utc) - fetched_at).total_seconds() / 86400
+        if age_days > ttl_days:
+            return None
+        return payload.get("text", "")
+    except Exception as exc:
+        logger.warning("page_cache_read_failed path=%s error=%s", path, exc)
+        return None
+
+
+def _write_page_cache(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "text": text,
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def fetch_page_text(
+    url: str,
+    timeout: int = 30,
+    max_chars: int = 8000,
+    cache_dir: Path | None = None,
+    cache_ttl_days: int = 30,
+) -> str:
+    """Fetch a page and extract readable main-body text for summarization."""
+    cache_dir = cache_dir or (DEFAULT_CACHE_DIR / "pages")
+    cache_file = _page_cache_path(url, cache_dir)
+    cached = _read_page_cache(cache_file, cache_ttl_days)
+    if cached is not None:
+        logger.info("page_cache_hit url=%s chars=%d", url, len(cached))
+        return cached
+
+    import requests
+
+    response = requests.get(
+        url,
+        timeout=timeout,
+        headers={"User-Agent": "Mozilla/5.0 (compatible; EMPOWER-KARE/1.0)"},
+    )
+    response.raise_for_status()
+    raw_html = response.text
+
+    raw_html = re.sub(r"(?is)<(script|style|noscript|svg)[^>]*>.*?</\1>", " ", raw_html)
+    content_html = raw_html
+    for pattern in (
+        r"(?is)<article[^>]*>(.*?)</article>",
+        r"(?is)<main[^>]*>(.*?)</main>",
+        r'(?is)<div[^>]+role=["\']main["\'][^>]*>(.*?)</div>',
+    ):
+        match = re.search(pattern, raw_html)
+        if match and len(match.group(1)) > 200:
+            content_html = match.group(1)
+            break
+
+    text = re.sub(r"(?is)<[^>]+>", " ", content_html)
+    text = html.unescape(text)
+    text = _normalize_whitespace(text)[:max_chars]
+    if text:
+        _write_page_cache(cache_file, text)
+    return text
+
+
+def enrich_search_result(result: SearchResult, cache_ttl_days: int = 30) -> SearchResult:
+    """Replace thin/nav-heavy Tavily snippets with fetched page text when possible."""
+    if not _snippet_needs_enrichment(result.snippet):
+        return result
+    try:
+        page_text = fetch_page_text(result.url, cache_ttl_days=cache_ttl_days)
+    except Exception as exc:
+        logger.warning("page_fetch_failed url=%s error=%s", result.url, exc)
+        return result
+    if not page_text:
+        return result
+    combined = page_text
+    snippet = result.snippet.strip()
+    if snippet and snippet not in page_text:
+        combined = f"{snippet}\n\n{page_text}"
+    return SearchResult(
+        url=result.url,
+        title=result.title,
+        snippet=combined[:8000],
+        domain=result.domain,
+    )
 
 
 def _search_tavily(query: str, api_key: str, max_results: int) -> List[dict]:
