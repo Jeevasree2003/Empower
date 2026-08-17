@@ -650,6 +650,7 @@ class TestEntityExtraction(unittest.TestCase):
         ]
         queries = build_queries(entities, max_queries=3)
         templates = {q.template for q in queries}
+        self.assertIn("mh_crisis_helpline", templates)
         self.assertIn("crime_statute_indiacode", templates)
         self.assertTrue(any(t.startswith("crime_") for t in templates))
 

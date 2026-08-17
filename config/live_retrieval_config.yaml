@@ -3,7 +3,7 @@
 enable_live_retrieval: true
 
 # Per-dialogue cap on distinct search queries (entity-driven).
-max_live_queries_per_dialogue: 3
+max_live_queries_per_dialogue: 6
 
 # Hard ceiling on search + LLM API calls per pipeline run (prevents runaway cost).
 max_api_calls_per_run: 100

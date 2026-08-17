@@ -53,7 +53,8 @@ _CRIME_IPC_SECTION: Dict[str, str] = {
 # Legal entities that mean "lodge/FIR" procedure, not abstract definitions.
 _FIR_PROCEDURE_ENTITIES = frozenset({"complaint", "complaints", "fir", "police complaint"})
 
-# When max_queries is small, crime/legal templates must not lose slots to MH crisis queries.
+# Template rank decides budget truncation. Crisis helpline is life-safety and
+# must never be crowded out; crime/legal still outrank generic MH/medium queries.
 _CATEGORY_PRIORITY = {
     CATEGORY_CRIME: 0,
     CATEGORY_LEGAL: 1,
@@ -62,6 +63,7 @@ _CATEGORY_PRIORITY = {
 }
 
 _TEMPLATE_PRIORITY = {
+    "mh_crisis_helpline": -1,  # life-safety: must never be crowded out by budget truncation
     "crime_statute_indiacode": 0,
     "crime_report_india": 1,
     "legal_fir_procedure": 2,
@@ -71,11 +73,10 @@ _TEMPLATE_PRIORITY = {
     "crime_medium_report": 6,
     "legal_general": 7,
     "legal_helpline": 8,
-    "mh_crisis_helpline": 9,
-    "mh_crisis_support": 10,
-    "mh_symptoms": 11,
-    "mh_treatment": 12,
-    "medium_report": 13,
+    "mh_crisis_support": 9,
+    "mh_symptoms": 10,
+    "mh_treatment": 11,
+    "medium_report": 12,
 }
 
 
