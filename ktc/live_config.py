@@ -15,7 +15,7 @@ DEFAULT_DOMAINS_PATH = PACKAGE_ROOT / "config" / "trusted_domains.yaml"
 
 @dataclass
 class LiveRetrievalConfig:
-    enable_live_retrieval: bool = True
+    enable_live_retrieval: bool = False
     max_live_queries_per_dialogue: int = 3
     max_api_calls_per_run: int = 100
     cache_ttl_days: int = 30
@@ -51,7 +51,7 @@ class LiveRetrievalConfig:
                     trusted.extend(d.lower().strip() for d in group if d)
 
         return cls(
-            enable_live_retrieval=bool(data.get("enable_live_retrieval", True)),
+            enable_live_retrieval=bool(data.get("enable_live_retrieval", False)),
             max_live_queries_per_dialogue=int(data.get("max_live_queries_per_dialogue", 3)),
             max_api_calls_per_run=int(data.get("max_api_calls_per_run", 100)),
             cache_ttl_days=int(data.get("cache_ttl_days", 30)),

@@ -14,5 +14,6 @@ python-dotenv
 # Live retrieval + summarization (hybrid knowledge path)
 openai
 
-# After install, download spaCy model:
+# After install:
 # python -m spacy download en_core_web_sm
+# python scripts/setup_nltk.py

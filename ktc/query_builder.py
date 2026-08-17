@@ -153,10 +153,10 @@ def _crime_queries(entity: str, medium: Optional[str] = None) -> List[SearchQuer
     statute = _crime_statute_indiacode_query(entity)
     if statute is not None:
         queries.append(statute)
-    if medium:
+    if medium and not _medium_is_redundant(medium, entity):
         queries.append(
             SearchQuery(
-                f"how to report {entity} on {medium} in India {CURRENT_YEAR}",
+                _medium_report_query_text(entity, medium),
                 entity,
                 CATEGORY_CRIME,
                 "crime_medium_report",
@@ -262,11 +262,35 @@ def _legal_queries(entity: str) -> List[SearchQuery]:
     ]
 
 
+_GENERIC_MEDIUMS = frozenset({"online", "phone", "sms", "email", "social media"})
+
+
+def _medium_is_redundant(medium: str, crime: str) -> bool:
+    """True when ``on {medium}`` would repeat words already in the crime phrase."""
+    medium_l = medium.strip().lower()
+    crime_l = crime.strip().lower()
+    if not medium_l or not crime_l:
+        return True
+    medium_tokens = set(medium_l.split())
+    crime_tokens = set(crime_l.split())
+    if medium_l in crime_l or crime_l in medium_l:
+        return True
+    return bool(medium_tokens & crime_tokens)
+
+
+def _medium_report_query_text(crime: str, medium: str) -> str:
+    if _medium_is_redundant(medium, crime):
+        return f"how to report {crime} in India {CURRENT_YEAR}"
+    if medium.strip().lower() in _GENERIC_MEDIUMS:
+        return f"how to report {crime} {medium} in India {CURRENT_YEAR}"
+    return f"how to report {crime} on {medium} in India {CURRENT_YEAR}"
+
+
 def _medium_queries(entity: str, crime_hint: Optional[str] = None) -> List[SearchQuery]:
     crime = crime_hint or "online abuse"
     return [
         SearchQuery(
-            f"how to report {crime} on {entity} in India {CURRENT_YEAR}",
+            _medium_report_query_text(crime, entity),
             entity,
             CATEGORY_MEDIUM,
             "medium_report",

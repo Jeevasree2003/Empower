@@ -46,17 +46,16 @@ _RELATION_STOPWORDS = frozenset(
 
 
 def _ensure_nltk():
-    for resource in ("punkt", "averaged_perceptron_tagger", "wordnet"):
-        try:
-            nltk.data.find(
-                "tokenizers/punkt"
-                if resource == "punkt"
-                else f"taggers/{resource}"
-                if resource == "averaged_perceptron_tagger"
-                else f"corpora/{resource}"
-            )
-        except LookupError:
-            nltk.download(resource, quiet=True)
+    """Require NLTK corpora already installed. Do not download at runtime."""
+    from ktc.nltk_setup import missing_filter_resources, setup_command
+
+    missing = missing_filter_resources()
+    if missing:
+        raise RuntimeError(
+            "NLTK data missing: "
+            + ", ".join(missing)
+            + f". Run `{setup_command()}` once after install (not at filter time)."
+        )
 
 
 def _contains_noun(text: str) -> bool:

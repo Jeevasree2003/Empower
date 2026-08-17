@@ -68,6 +68,7 @@ def build_turn_examples(
     dialogue: dict,
     pipeline: KnowledgeTripletPipeline,
     knowledge_mode: str = "ktc",
+    enable_live: bool = False,
 ) -> List[dict]:
     utterances = sorted(dialogue["utterances"], key=lambda u: int(u["utterance_no"]))
     knowledge_text = dialogue.get("knowledge", "") or ""
@@ -86,7 +87,12 @@ def build_turn_examples(
             else:
                 if filtered_triplets is None:
                     filtered_triplets = pipeline.get_filtered_triplets(knowledge_text)
-                verbalized = pipeline.run(knowledge_text, dialog_history, filtered=filtered_triplets)
+                verbalized = pipeline.run(
+                    knowledge_text,
+                    dialog_history,
+                    filtered=filtered_triplets,
+                    enable_live=enable_live,
+                )
 
             if verbalized:
                 knowledge_for_training = " ".join(verbalized)
@@ -131,6 +137,7 @@ def preprocess(
     coref_backend: str = "model",
     top_k: int = 26,
     max_dialogues: Optional[int] = None,
+    enable_live: bool = False,
 ) -> Dict[str, int]:
     dialogues = load_dialogues(input_path)
     if max_dialogues is not None:
@@ -147,7 +154,11 @@ def preprocess(
     for split_name, split_data in splits.items():
         examples: List[dict] = []
         for dialogue in split_data:
-            examples.extend(build_turn_examples(dialogue, pipeline, knowledge_mode=knowledge_mode))
+            examples.extend(
+                build_turn_examples(
+                    dialogue, pipeline, knowledge_mode=knowledge_mode, enable_live=enable_live
+                )
+            )
         counts[split_name] = write_split(output_dir / f"{split_name}.json", examples)
     return counts
 
@@ -195,6 +206,12 @@ def main():
         default=None,
         help="Process only the first N dialogues (useful for smoke tests).",
     )
+    parser.add_argument(
+        "--enable-live",
+        action="store_true",
+        default=False,
+        help="Opt in to hybrid live retrieval (off by default; uses one shared API budget).",
+    )
     args = parser.parse_args()
 
     counts = preprocess(
@@ -209,6 +226,7 @@ def main():
         coref_backend=args.coref_backend,
         top_k=args.top_k,
         max_dialogues=args.max_dialogues,
+        enable_live=args.enable_live,
     )
 
     for split_name, count in counts.items():

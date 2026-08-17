@@ -16,10 +16,21 @@ from ktc.query_builder import SearchQuery, build_queries
 logger = logging.getLogger(__name__)
 
 
+_SPEAKER_SPLIT = re.compile(
+    r"\s+(?=agent:|bot:|victim:|user:|seeker:|client:)",
+    re.IGNORECASE,
+)
+_VICTIM_PREFIXES = ("victim:", "user:", "seeker:", "client:")
+
+
 def victim_utterance_from_history(dialog_history: str) -> str:
-    """Return the most recent victim utterance from formatted dialog history."""
-    parts = re.split(r"\s+(?=agent:|victim:)", dialog_history.strip())
-    victim_parts = [p for p in parts if p.startswith("victim:")]
+    """Return the most recent victim utterance from formatted dialog history.
+
+    KARE raw roles are ``user``/``bot``; preprocess maps them to ``victim``/``agent``.
+    Accept both so inspect scripts on raw JSONL still trigger live retrieval.
+    """
+    parts = _SPEAKER_SPLIT.split(dialog_history.strip())
+    victim_parts = [p for p in parts if p.lower().startswith(_VICTIM_PREFIXES)]
     if not victim_parts:
         return ""
     last = victim_parts[-1]

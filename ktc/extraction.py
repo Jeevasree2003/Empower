@@ -35,6 +35,30 @@ def _span_text(token) -> str:
     return " ".join(t.text for t in token.subtree).strip()
 
 
+def _np_core_span(token) -> str:
+    """Noun-phrase text without trailing prepositional modifiers.
+
+    ``complaint.subtree`` otherwise swallows ``at the police station``, and a
+    separate verb-level ``pobj`` then looks like a second object of ``lodge``.
+    """
+    drop = set()
+    for child in token.children:
+        if child.dep_ == "prep":
+            drop.update(t.i for t in child.subtree)
+    return " ".join(t.text for t in token.subtree if t.i not in drop).strip()
+
+
+def _noun_prep_pobjs(token) -> List[tuple]:
+    pairs: List[tuple] = []
+    for child in token.children:
+        if child.dep_ != "prep":
+            continue
+        for pobj in child.children:
+            if pobj.dep_ == "pobj":
+                pairs.append((child, pobj))
+    return pairs
+
+
 def _expand_conjuncts(token) -> List:
     """Return *token* and any coordinated conjunct siblings."""
     group = [token]
@@ -87,28 +111,49 @@ def _subjects_for_verb(verb_token, inherit_conj: bool = True) -> List:
     return [_resolve_subject_token(subj, verb_token) for subj in subjects]
 
 
-def _objects_for_verb(verb_token) -> List:
-    objects = [
-        t
-        for t in verb_token.rights
-        if t.dep_ in {"dobj", "pobj", "attr", "dative", "oprd", "acomp", "obj", "xcomp"}
-    ]
+_CORE_OBJ_DEPS = frozenset({"dobj", "obj", "attr", "dative", "oprd", "acomp", "xcomp"})
+
+
+def _core_objects_for_verb(verb_token) -> List:
+    """Direct/core objects only — never prepositional objects.
+
+    Mixing ``pobj`` into this list with the same relation produces nonsense such as
+    ``(victim, lodge, a police station)`` from ``lodge a complaint at the police station``.
+    """
+    objects = [t for t in verb_token.rights if t.dep_ in _CORE_OBJ_DEPS]
     if not objects:
-        objects = [
-            t
-            for t in verb_token.children
-            if t.dep_ in {"dobj", "pobj", "attr", "obj", "acomp", "xcomp"}
-        ]
-    for child in verb_token.children:
-        if child.dep_ == "prep":
-            objects.extend(t for t in child.children if t.dep_ == "pobj")
+        objects = [t for t in verb_token.children if t.dep_ in _CORE_OBJ_DEPS]
     return objects
+
+
+def _prep_pobjs_for_verb(verb_token) -> List[tuple]:
+    """Return ``(prep_token, pobj_token)`` pairs attached to *verb_token*."""
+    pairs: List[tuple] = []
+    for child in verb_token.children:
+        if child.dep_ != "prep":
+            continue
+        for pobj in child.children:
+            if pobj.dep_ == "pobj":
+                pairs.append((child, pobj))
+    return pairs
+
+
+def _cartesian_triplets(head_tokens, relation: str, tail_tokens, *, tail_span=_span_text) -> List[Triplet]:
+    triplets: List[Triplet] = []
+    for head_tok in head_tokens:
+        for tail_tok in tail_tokens:
+            head = _span_text(head_tok)
+            tail = tail_span(tail_tok)
+            if head and relation and tail:
+                triplets.append(Triplet(head=head, relation=relation, tail=tail))
+    return triplets
 
 
 def _triplets_from_verb(verb_token) -> List[Triplet]:
     """Extract one or more triplets from a single verb token (any clause)."""
     subjects = _subjects_for_verb(verb_token)
-    objects = _objects_for_verb(verb_token)
+    core_objects = _core_objects_for_verb(verb_token)
+    prep_pairs = _prep_pobjs_for_verb(verb_token)
     relation = _relation_span(verb_token)
     triplets: List[Triplet] = []
 
@@ -119,32 +164,36 @@ def _triplets_from_verb(verb_token) -> List[Triplet]:
     if passive_subj and agent is not None:
         head_spans = _expand_conjuncts(agent)
         tail_spans = _expand_conjuncts(passive_subj)
-        for head_tok in head_spans:
-            for tail_tok in tail_spans:
-                head = _span_text(head_tok)
-                tail = _span_text(tail_tok)
-                if head and relation and tail:
-                    triplets.append(Triplet(head=head, relation=relation, tail=tail))
+        triplets.extend(_cartesian_triplets(head_spans, relation, tail_spans))
         if triplets:
             return triplets
 
-    if not subjects or not objects:
+    if not subjects or (not core_objects and not prep_pairs):
         return []
 
     head_tokens: List = []
     for subj in subjects:
         head_tokens.extend(_expand_conjuncts(subj))
 
-    tail_tokens: List = []
-    for obj in objects:
-        tail_tokens.extend(_expand_conjuncts(obj))
+    if core_objects:
+        tail_tokens: List = []
+        for obj in core_objects:
+            tail_tokens.extend(_expand_conjuncts(obj))
+        triplets.extend(
+            _cartesian_triplets(head_tokens, relation, tail_tokens, tail_span=_np_core_span)
+        )
+        for obj in tail_tokens:
+            for prep_tok, pobj in _noun_prep_pobjs(obj):
+                prep_rel = f"{relation} {prep_tok.text}".strip()
+                triplets.extend(
+                    _cartesian_triplets(head_tokens, prep_rel, _expand_conjuncts(pobj))
+                )
 
-    for head_tok in head_tokens:
-        for tail_tok in tail_tokens:
-            head = _span_text(head_tok)
-            tail = _span_text(tail_tok)
-            if head and relation and tail:
-                triplets.append(Triplet(head=head, relation=relation, tail=tail))
+    # Locative/oblique arguments keep the preposition on the relation so they
+    # cannot clobber a direct object under the same verb.
+    for prep_tok, pobj in prep_pairs:
+        prep_rel = f"{relation} {prep_tok.text}".strip()
+        triplets.extend(_cartesian_triplets(head_tokens, prep_rel, _expand_conjuncts(pobj)))
 
     return triplets
 

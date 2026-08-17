@@ -9,7 +9,13 @@ from unittest import mock
 import numpy as np
 
 from ktc.coreference import resolve_coreferences
-from ktc.entity_extraction import CATEGORY_CRIME, CATEGORY_LEGAL, CATEGORY_MENTAL_HEALTH, extract_entities
+from ktc.entity_extraction import (
+    CATEGORY_CRIME,
+    CATEGORY_LEGAL,
+    CATEGORY_MEDIUM,
+    CATEGORY_MENTAL_HEALTH,
+    extract_entities,
+)
 from ktc.extraction import _relation_span, extract_triplets
 from ktc.filtering import passes_filters
 from ktc.knowledge_item import KnowledgeCandidate
@@ -120,6 +126,35 @@ class TestExtraction(unittest.TestCase):
         self.assertGreaterEqual(len(triplets), 2)
         self.assertTrue(any("investigat" in r for r in relations))
         self.assertTrue(any("prosecut" in r for r in relations))
+
+    def test_direct_object_not_replaced_by_pobj(self):
+        triplets = self._extract("Victims can lodge a complaint at the police station.")
+        self.assertTrue(triplets)
+        lodge_bare = [
+            t
+            for t in triplets
+            if "lodge" in t.relation.lower() and " at" not in f" {t.relation.lower()}"
+        ]
+        self.assertTrue(
+            any("complaint" in t.tail.lower() for t in lodge_bare),
+            msg=f"expected lodge+complaint, got {[(t.relation, t.tail) for t in triplets]}",
+        )
+        self.assertFalse(
+            any("police" in t.tail.lower() and "complaint" not in t.tail.lower() for t in lodge_bare),
+            msg="pobj clobbered dobj: " + repr([(t.relation, t.tail) for t in lodge_bare]),
+        )
+
+    def test_prepositional_object_keeps_prep_on_relation(self):
+        triplets = self._extract("Victims can lodge a complaint at the police station.")
+        prep_hits = [
+            t
+            for t in triplets
+            if "lodge" in t.relation.lower() and "at" in t.relation.lower()
+        ]
+        self.assertTrue(
+            any("police" in t.tail.lower() for t in prep_hits),
+            msg=f"expected lodge-at + police station, got {[(t.relation, t.tail) for t in triplets]}",
+        )
 
 
 class TestFiltering(unittest.TestCase):
@@ -547,6 +582,22 @@ class TestLiveSummarize(unittest.TestCase):
 
 
 class TestLiveKnowledge(unittest.TestCase):
+    def test_victim_utterance_accepts_kare_user_role(self):
+        from ktc.live_knowledge import victim_utterance_from_history
+
+        history = (
+            "agent: Hello, this is Rakshak. "
+            "user: I'm an actress in a channel series, and the staff members raped me."
+        )
+        text = victim_utterance_from_history(history)
+        self.assertIn("raped me", text.lower())
+
+    def test_victim_utterance_prefers_mapped_victim_role(self):
+        from ktc.live_knowledge import victim_utterance_from_history
+
+        history = "agent: Hi. victim: He threatened to kill me."
+        self.assertIn("threatened", victim_utterance_from_history(history).lower())
+
     @mock.patch("ktc.live_knowledge.summarize_search_results")
     @mock.patch("ktc.live_knowledge.search_allowlisted")
     def test_fetch_live_knowledge_offline(self, mock_search, mock_summarize):
@@ -653,6 +704,90 @@ class TestEntityExtraction(unittest.TestCase):
         self.assertIn("mh_crisis_helpline", templates)
         self.assertIn("crime_statute_indiacode", templates)
         self.assertTrue(any(t.startswith("crime_") for t in templates))
+
+    def test_medium_query_does_not_repeat_online(self):
+        entities = [{"text": "online", "category": CATEGORY_MEDIUM}]
+        queries = build_queries(entities, max_queries=3)
+        self.assertTrue(queries)
+        for q in queries:
+            lowered = q.text.lower()
+            self.assertNotIn("on online", lowered)
+            self.assertNotIn("online abuse on online", lowered)
+
+    def test_platform_medium_keeps_on_preposition(self):
+        entities = [
+            {"text": "stalking", "category": CATEGORY_CRIME},
+            {"text": "instagram", "category": CATEGORY_MEDIUM},
+        ]
+        queries = build_queries(entities, max_queries=8)
+        texts = [q.text.lower() for q in queries]
+        self.assertTrue(any("on instagram" in t for t in texts), msg=texts)
+        self.assertFalse(any("on online" in t for t in texts))
+
+
+class TestNltkSetup(unittest.TestCase):
+    def test_resource_table_covers_filter_tagger(self):
+        from ktc.nltk_setup import NLTK_RESOURCES, setup_command
+
+        names = {name for _, name in NLTK_RESOURCES}
+        self.assertIn("punkt", names)
+        self.assertIn("averaged_perceptron_tagger", names)
+        self.assertIn("scripts/setup_nltk.py", setup_command())
+
+
+class TestPipelineIntegration(unittest.TestCase):
+    def test_config_defaults_live_retrieval_off(self):
+        config = LiveRetrievalConfig.load()
+        self.assertFalse(config.enable_live_retrieval)
+
+    def test_static_run_does_not_call_live_fetch(self):
+        from ktc.pipeline import KnowledgeTripletPipeline
+
+        knowledge = "Victims can lodge a complaint at the police station."
+        history = "agent: Hello. victim: The staff members raped me."
+        with mock.patch("ktc.pipeline.fetch_live_knowledge") as fetch:
+            pipeline = KnowledgeTripletPipeline(
+                verbalization_backend="template",
+                coref_backend="heuristic",
+            )
+            sentences = pipeline.run(knowledge, history, enable_live=False)
+        fetch.assert_not_called()
+        self.assertTrue(sentences)
+        joined = " ".join(sentences).lower()
+        self.assertNotIn("lodge a police station", joined)
+
+    def test_run_omitted_enable_live_follows_config_off(self):
+        from ktc.pipeline import KnowledgeTripletPipeline
+
+        with mock.patch("ktc.pipeline.fetch_live_knowledge") as fetch:
+            pipeline = KnowledgeTripletPipeline(
+                verbalization_backend="template",
+                coref_backend="heuristic",
+            )
+            pipeline.run(
+                "Victims can file a complaint online.",
+                "agent: Hi. victim: I need help.",
+            )
+        fetch.assert_not_called()
+
+    def test_enable_live_true_calls_fetch(self):
+        from ktc.pipeline import KnowledgeTripletPipeline
+
+        with mock.patch(
+            "ktc.pipeline.fetch_live_knowledge", return_value=([], [], [])
+        ) as fetch:
+            pipeline = KnowledgeTripletPipeline(
+                verbalization_backend="template",
+                coref_backend="heuristic",
+            )
+            pipeline.run(
+                "Victims can file a complaint.",
+                "agent: Hi. user: I was raped.",
+                enable_live=True,
+            )
+        fetch.assert_called_once()
+        victim_arg = fetch.call_args[0][0]
+        self.assertIn("raped", victim_arg.lower())
 
 
 if __name__ == "__main__":

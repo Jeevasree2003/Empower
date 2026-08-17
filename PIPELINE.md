@@ -21,14 +21,18 @@ cp .env.example .env
   `config/live_retrieval_config.yaml`). Set `LLM_API_KEY` to your Groq API key.
 - Entry scripts call `load_dotenv()` **before** importing `ktc` live modules, so the
   environment is populated when `LiveRetrievalConfig.load()` or `search_allowlisted()` run.
-- Standard preprocessing (`scripts/preprocess_kare.py`) uses static KTC with LLM
-  verbalization by default; live retrieval only runs when `run_hybrid(enable_live=True)`
-  is used with keys present.
+- Standard preprocessing (`scripts/preprocess_kare.py`) is **static KTC** (live retrieval
+  off). Pass `--enable-live` only when you explicitly want hybrid retrieval; otherwise a
+  full-dataset run would share one 100-call API budget and silently fall back to static
+  mid-run. `inspect_ktc.py` still defaults live **on** for demos (`--enable-live` /
+  `--no-enable-live`).
 
 Install dependencies (includes `python-dotenv`):
 
 ```bash
 pip install -r requirements.txt
+python -m spacy download en_core_web_sm
+python scripts/setup_nltk.py
 ```
 
 ## Dataset
@@ -183,6 +187,7 @@ python scripts/inspect_samples.py --input ../../KARE-data/KARE/Data/KARE.jsonl
 cd EMPOWER-KARE
 pip install -r requirements.txt
 python -m spacy download en_core_web_sm
+python scripts/setup_nltk.py
 
 python scripts/preprocess_kare.py \
   --input ../../KARE-data/KARE/Data/KARE.jsonl \

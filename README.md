@@ -6,6 +6,8 @@ This code is tested on Python 3.8, Pytorch 1.7.1, and transformers 4.18.0
 
 `python -m spacy download en_core_web_sm`
 
+`python scripts/setup_nltk.py`
+
 See [PIPELINE.md](PIPELINE.md) for the full end-to-end pipeline (KTC preprocessing, dataset splits, training, inference, evaluation).
 
 ---

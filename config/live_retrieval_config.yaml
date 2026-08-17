@@ -1,6 +1,6 @@
 # Live knowledge retrieval guardrails and toggles.
 
-enable_live_retrieval: true
+enable_live_retrieval: false
 
 # Per-dialogue cap on distinct search queries (entity-driven).
 max_live_queries_per_dialogue: 6
