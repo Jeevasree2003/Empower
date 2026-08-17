@@ -9,9 +9,16 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 from ktc.pipeline import KnowledgeTripletPipeline
+
+ROLE_MAP = {
+    "bot": "agent",
+    "agent": "agent",
+    "user": "victim",
+    "victim": "victim",
+}
 
 
 def main():
@@ -30,6 +37,12 @@ def main():
         choices=["heuristic", "model"],
         default="heuristic",
         help="Coreference backend (heuristic avoids coreferee install for demos).",
+    )
+    parser.add_argument(
+        "--verbalization-backend",
+        choices=["llm", "template"],
+        default="template",
+        help="Template avoids Groq verbalization rate limits during demos.",
     )
     args = parser.parse_args()
 
@@ -50,7 +63,7 @@ def main():
     target_history = None
 
     for utterance in utterances:
-        role = utterance["author_role"]
+        role = ROLE_MAP.get(utterance["author_role"], utterance["author_role"])
         text = f"{role}: {utterance['utterance'].strip()}"
         if role in {"bot", "agent"} and history:
             if bot_turn == args.turn:
@@ -62,7 +75,10 @@ def main():
     if target_history is None:
         raise SystemExit(f"Bot turn {args.turn} not found")
 
-    pipeline = KnowledgeTripletPipeline(coref_backend=args.coref_backend)
+    pipeline = KnowledgeTripletPipeline(
+        coref_backend=args.coref_backend,
+        verbalization_backend=args.verbalization_backend,
+    )
     result = pipeline.inspect(
         dialogue["knowledge"],
         target_history,
