@@ -45,9 +45,21 @@ Sentence: The complaint was filed by the police.
 
 def _clean(text: str) -> str:
     text = re.sub(r"\s+", " ", text.strip())
+    if text:
+        text = text[0].upper() + text[1:]
     if text and text[-1] not in ".!?":
         text += "."
     return text
+
+
+def _sanitize_llm_sentence(text: str) -> str:
+    """Keep only the first fluent sentence; drop model meta-commentary."""
+    text = re.sub(r"\s+", " ", (text or "").strip())
+    for marker in (" Note:", " However,", " Note that", "\nNote:", "\nHowever,"):
+        idx = text.find(marker)
+        if idx > 0:
+            text = text[:idx].strip()
+    return _clean(text)
 
 
 def _is_passive_relation(relation_lower: str) -> bool:
@@ -128,8 +140,9 @@ def verbalize_llm(
     resolved_model = model or config.llm_model
     sentences: List[str] = []
     system_prompt = (
-        "Convert knowledge triplets into one fluent English sentence each. "
-        "Write natural sentences, not concatenations. "
+        "Convert each knowledge triplet into exactly one fluent English sentence. "
+        "Output ONLY the final sentence. No notes, no explanations, no alternative phrasing, "
+        "no preamble, and no markdown. "
         "Match the style of these examples:\n\n"
         f"{_LLM_FEW_SHOT_EXAMPLES}"
     )
@@ -150,7 +163,7 @@ def verbalize_llm(
                 temperature=0.2,
                 max_tokens=80,
             )
-            sentences.append(_clean(response.choices[0].message.content or ""))
+            sentences.append(_sanitize_llm_sentence(response.choices[0].message.content or ""))
         except Exception as exc:
             if fallback_to_template:
                 logger.warning(

@@ -20,7 +20,7 @@ from ktc.live_summarize import summarize_search_results
 from ktc.query_builder import build_queries
 from ktc.ranking import _stable_rank_order
 from ktc.triplet import Triplet
-from ktc.verbalization import verbalize_llm, verbalize_template, verbalize_triplets
+from ktc.verbalization import verbalize_llm, verbalize_template, verbalize_triplets, _sanitize_llm_sentence
 
 # KARE.jsonl path: env override, then repo-relative default; skip integration tests if missing.
 _DATA_ENV = os.environ.get("KARE_JSONL_PATH")
@@ -161,6 +161,15 @@ class TestVerbalization(unittest.TestCase):
         sentence = verbalize_template(Triplet("Cyber Cells", "are present in", "every state"))
         self.assertTrue(sentence.endswith("."))
         self.assertIn("Cyber Cells", sentence)
+        self.assertTrue(sentence[0].isupper())
+
+    def test_sanitize_llm_sentence_strips_meta_commentary(self):
+        raw = (
+            "A victim can file an online complaint. "
+            "Note: The given relation does not fit grammatically."
+        )
+        sentence = _sanitize_llm_sentence(raw)
+        self.assertEqual(sentence, "A victim can file an online complaint.")
 
     def test_passive_inverts_head_tail(self):
         sentence = verbalize_template(Triplet("the police", "was filed by", "the complaint"))
@@ -175,7 +184,7 @@ class TestVerbalization(unittest.TestCase):
 
     def test_present_participle(self):
         sentence = verbalize_template(Triplet("victims", "are facing", "online harassment"))
-        self.assertIn("victims", sentence)
+        self.assertIn("victims", sentence.lower())
         self.assertIn("harassment", sentence)
 
     @mock.patch.dict(os.environ, {}, clear=True)
@@ -375,7 +384,7 @@ class TestLiveConfig(unittest.TestCase):
 
     def test_groq_llm_api_base_from_config(self):
         config = LiveRetrievalConfig.load()
-        self.assertEqual(config.llm_model, "llama-3.3-70b-versatile")
+        self.assertEqual(config.llm_model, "openai/gpt-oss-120b")
         self.assertEqual(config.llm_api_base, "https://api.groq.com/openai/v1")
 
     def test_api_call_budget(self):
@@ -633,6 +642,16 @@ class TestEntityExtraction(unittest.TestCase):
         self.assertNotIn("legal_general", templates)
         fir = next(q for q in queries if q.template == "legal_fir_procedure")
         self.assertIn("154", fir.text)
+
+    def test_crime_queries_not_crowded_out_by_crisis(self):
+        entities = [
+            {"text": "dying", "category": CATEGORY_MENTAL_HEALTH},
+            {"text": "murder", "category": CATEGORY_CRIME},
+        ]
+        queries = build_queries(entities, max_queries=3)
+        templates = {q.template for q in queries}
+        self.assertIn("crime_statute_indiacode", templates)
+        self.assertTrue(any(t.startswith("crime_") for t in templates))
 
 
 if __name__ == "__main__":

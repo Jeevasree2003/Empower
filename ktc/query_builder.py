@@ -53,6 +53,31 @@ _CRIME_IPC_SECTION: Dict[str, str] = {
 # Legal entities that mean "lodge/FIR" procedure, not abstract definitions.
 _FIR_PROCEDURE_ENTITIES = frozenset({"complaint", "complaints", "fir", "police complaint"})
 
+# When max_queries is small, crime/legal templates must not lose slots to MH crisis queries.
+_CATEGORY_PRIORITY = {
+    CATEGORY_CRIME: 0,
+    CATEGORY_LEGAL: 1,
+    CATEGORY_MENTAL_HEALTH: 2,
+    CATEGORY_MEDIUM: 3,
+}
+
+_TEMPLATE_PRIORITY = {
+    "crime_statute_indiacode": 0,
+    "crime_report_india": 1,
+    "legal_fir_procedure": 2,
+    "crime_definition": 3,
+    "legal_section_definition": 4,
+    "legal_section_punishment": 5,
+    "crime_medium_report": 6,
+    "legal_general": 7,
+    "legal_helpline": 8,
+    "mh_crisis_helpline": 9,
+    "mh_crisis_support": 10,
+    "mh_symptoms": 11,
+    "mh_treatment": 12,
+    "medium_report": 13,
+}
+
 
 def _canonical_phrase(entity: str, category: str) -> str:
     key = entity.strip().lower()
@@ -266,8 +291,13 @@ def build_queries(
                 crime_context = e["text"]
                 break
 
+    ordered_entities = sorted(
+        entities,
+        key=lambda entity: _CATEGORY_PRIORITY.get(entity["category"], 99),
+    )
+
     built: List[SearchQuery] = []
-    for entity in entities:
+    for entity in ordered_entities:
         raw_text = entity["text"]
         category = entity["category"]
         text = _canonical_phrase(raw_text, category)
@@ -289,6 +319,7 @@ def build_queries(
             seen.add(key)
             unique.append(q)
 
+    unique.sort(key=lambda q: (_TEMPLATE_PRIORITY.get(q.template, 50), q.text.lower()))
     selected = unique[:max_queries]
     for q in selected:
         logger.info(

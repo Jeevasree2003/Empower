@@ -17,7 +17,7 @@ cp .env.example .env
 - `.env` is listed in `.gitignore` and is **never committed** — safe for secrets.
 - Keys are read via `os.environ` (`LIVE_SEARCH_API_KEY`, `LLM_API_KEY`, optional `LLM_API_BASE`).
 - Summarization uses an **OpenAI-compatible client** pointed at Groq by default
-  (`llm_api_base: https://api.groq.com/openai/v1`, `llm_model: llama-3.3-70b-versatile` in
+  (`llm_api_base: https://api.groq.com/openai/v1`, `llm_model: openai/gpt-oss-120b` in
   `config/live_retrieval_config.yaml`). Set `LLM_API_KEY` to your Groq API key.
 - Entry scripts call `load_dotenv()` **before** importing `ktc` live modules, so the
   environment is populated when `LiveRetrievalConfig.load()` or `search_allowlisted()` run.
@@ -83,7 +83,7 @@ Implemented in `ktc/` with five testable sub-modules:
 
 The paper used few-shot GPT-J. This repo now defaults to **LLM verbalization** via the
 same OpenAI-compatible Groq endpoint as live summarization (`LLM_API_KEY`,
-`config/live_retrieval_config.yaml` → `llama-3.3-70b-versatile`). If no API key is
+`config/live_retrieval_config.yaml` → `openai/gpt-oss-120b`). If no API key is
 present, verbalization **falls back to template** with a warning so unit tests and
 offline smoke runs still work.
 
@@ -160,6 +160,21 @@ Run KTC tests:
 
 ```bash
 python -m unittest ktc.test_ktc
+```
+
+Inspect a dialogue (hybrid static + live; needs `LLM_API_KEY` and `LIVE_SEARCH_API_KEY`):
+
+```bash
+python scripts/inspect_ktc.py \
+  --input ../../KARE-data/KARE/Data/KARE.jsonl \
+  --dialogue_id 1 \
+  --turn 0
+```
+
+Static-only sample dump (live off):
+
+```bash
+python scripts/inspect_samples.py --input ../../KARE-data/KARE/Data/KARE.jsonl
 ```
 
 ## Stage 3 — Preprocessed dataset
