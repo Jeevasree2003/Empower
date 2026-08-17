@@ -15,7 +15,7 @@ from ktc.live_config import ApiCallBudget, LiveRetrievalConfig
 from ktc.live_knowledge import fetch_live_knowledge, static_candidates_from_triplets, victim_utterance_from_history
 from ktc.ranking import CandidateRanker, SentenceBertRanker, rank_candidates, rank_triplets
 from ktc.triplet import Triplet
-from ktc.verbalization import verbalize_template, verbalize_triplets
+from ktc.verbalization import verbalize_triplets
 
 
 @dataclass
@@ -32,8 +32,8 @@ class KnowledgeTripletPipeline:
 
     top_k: int = 26
     openie_backend: str = "spacy"
-    coref_backend: str = "heuristic"
-    verbalization_backend: str = "template"
+    coref_backend: str = "model"
+    verbalization_backend: str = "llm"
     ranker: Optional[CandidateRanker] = field(default=None, repr=False)
     _nlp: Optional[object] = field(default=None, repr=False)
     _knowledge_cache: Dict[str, List[Triplet]] = field(default_factory=dict, repr=False)
@@ -68,16 +68,31 @@ class KnowledgeTripletPipeline:
         return self._knowledge_cache[digest]
 
     def _verbalize_candidates(self, ranked: List[KnowledgeCandidate]) -> List[str]:
-        sentences: List[str] = []
-        for candidate in ranked:
+        result: List[Optional[str]] = [None] * len(ranked)
+        static_triplets: List[Triplet] = []
+        static_indices: List[int] = []
+
+        for i, candidate in enumerate(ranked):
             if candidate.source == "static_dataset" and candidate.triplet is not None:
-                sentences.append(verbalize_template(candidate.triplet))
+                static_indices.append(i)
+                static_triplets.append(candidate.triplet)
             else:
                 text = candidate.text.strip()
                 if text and text[-1] not in ".!?":
                     text += "."
-                sentences.append(text)
-        return sentences
+                result[i] = text
+
+        if static_triplets:
+            verbalized = verbalize_triplets(
+                static_triplets,
+                backend=self.verbalization_backend,
+                model=self.live_config.llm_model,
+                llm_config=self.live_config,
+            )
+            for idx, sentence in zip(static_indices, verbalized):
+                result[idx] = sentence
+
+        return [sentence for sentence in result if sentence is not None]
 
     def run(
         self,

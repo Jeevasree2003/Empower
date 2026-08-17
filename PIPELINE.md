@@ -21,8 +21,9 @@ cp .env.example .env
   `config/live_retrieval_config.yaml`). Set `LLM_API_KEY` to your Groq API key.
 - Entry scripts call `load_dotenv()` **before** importing `ktc` live modules, so the
   environment is populated when `LiveRetrievalConfig.load()` or `search_allowlisted()` run.
-- Standard preprocessing (`scripts/preprocess_kare.py`) uses static KTC by default; live
-  retrieval only runs when `run_hybrid(enable_live=True)` is used with keys present.
+- Standard preprocessing (`scripts/preprocess_kare.py`) uses static KTC with LLM
+  verbalization by default; live retrieval only runs when `run_hybrid(enable_live=True)`
+  is used with keys present.
 
 Install dependencies (includes `python-dotenv`):
 
@@ -72,24 +73,37 @@ Implemented in `ktc/` with five testable sub-modules:
 
 | Step | Module | Method |
 |------|--------|--------|
-| 2a | `ktc/extraction.py` | spaCy dependency OpenIE (Stanford OpenIE-compatible interface) |
+| 2a | `ktc/extraction.py` | spaCy dependency OpenIE — **all clause verbs**, not ROOT-only |
 | 2b | `ktc/filtering.py` | Paper filtering rules (a–e) |
-| 2c | `ktc/coreference.py` | Pronoun head resolution via spaCy noun phrases |
+| 2c | `ktc/coreference.py` | **coreferee** (default) or heuristic pronoun resolution |
 | 2d | `ktc/ranking.py` | Sentence-BERT cosine similarity, top **26** triplets |
-| 2e | `ktc/verbalization.py` | **Template-based** verbalization (default) |
+| 2e | `ktc/verbalization.py` | **LLM few-shot verbalization** (default; Groq via `LLM_API_KEY`) |
 
 ### Verbalization choice (Stage 2e)
 
-The paper used few-shot GPT-J. This repo defaults to **template-based verbalization**
-so preprocessing runs locally without API keys. For closer replication, run:
+The paper used few-shot GPT-J. This repo now defaults to **LLM verbalization** via the
+same OpenAI-compatible Groq endpoint as live summarization (`LLM_API_KEY`,
+`config/live_retrieval_config.yaml` → `llama-3.3-70b-versatile`). If no API key is
+present, verbalization **falls back to template** with a warning so unit tests and
+offline smoke runs still work.
+
+For fully offline preprocessing:
 
 ```bash
-export OPENAI_API_KEY=...
-python scripts/preprocess_kare.py --verbalization_backend llm
+python scripts/preprocess_kare.py --verbalization_backend template --coref_backend heuristic
 ```
 
-Template verbalization produces fluent single sentences rather than naive
-`head + relation + tail` concatenation.
+### Extraction coverage (Stage 2a)
+
+OpenIE runs on **every clause verb** in a sentence (relative clauses, coordinated
+verbs, subordinate clauses), not only the ROOT verb. Auxiliary tokens (`can`, `was`)
+attached to another verb are skipped to avoid empty duplicate passes.
+
+### Coreference (Stage 2c)
+
+Default backend is **`model`** (spaCy **coreferee**). Install with
+`pip install coreferee` and `python -m coreferee install en`. Use
+`--coref_backend heuristic` when coreferee is unavailable.
 
 ### Live retrieval query policy (Stage 0.5)
 

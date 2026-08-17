@@ -127,8 +127,8 @@ def preprocess(
     test_size: int = 500,
     seed: int = 42,
     knowledge_mode: str = "ktc",
-    verbalization_backend: str = "template",
-    coref_backend: str = "heuristic",
+    verbalization_backend: str = "llm",
+    coref_backend: str = "model",
     top_k: int = 26,
     max_dialogues: Optional[int] = None,
 ) -> Dict[str, int]:
@@ -179,13 +179,13 @@ def main():
     parser.add_argument(
         "--verbalization_backend",
         choices=["template", "llm"],
-        default="template",
-        help="Verbalization backend for Stage 2e.",
+        default="llm",
+        help="Verbalization backend for Stage 2e (llm=Groq/OpenAI-compatible; template=offline).",
     )
     parser.add_argument(
         "--coref_backend",
         choices=["heuristic", "model"],
-        default="heuristic",
+        default="model",
         help="Coreference backend for Stage 2c (heuristic=local rules, model=coreferee).",
     )
     parser.add_argument("--top_k", type=int, default=26)

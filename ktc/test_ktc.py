@@ -20,7 +20,7 @@ from ktc.live_summarize import summarize_search_results
 from ktc.query_builder import build_queries
 from ktc.ranking import _stable_rank_order
 from ktc.triplet import Triplet
-from ktc.verbalization import verbalize_template
+from ktc.verbalization import verbalize_llm, verbalize_template, verbalize_triplets
 
 # KARE.jsonl path: env override, then repo-relative default; skip integration tests if missing.
 _DATA_ENV = os.environ.get("KARE_JSONL_PATH")
@@ -104,6 +104,23 @@ class TestExtraction(unittest.TestCase):
             for t in triplets:
                 self.assertTrue(t.head and t.relation and t.tail)
 
+    def test_relative_clause_verb(self):
+        triplets = self._extract(
+            "Victims who report cyberstalking to the Cyber Cell, which operates under the IT Act, "
+            "can also approach the NCW."
+        )
+        relations = {t.relation.lower() for t in triplets}
+        self.assertGreaterEqual(len(triplets), 2)
+        self.assertTrue(any("report" in r for r in relations))
+        self.assertTrue(any("approach" in r for r in relations))
+
+    def test_coordinated_verbs(self):
+        triplets = self._extract("Cyber Cell investigates cases and prosecutes offenders.")
+        relations = {t.relation.lower() for t in triplets}
+        self.assertGreaterEqual(len(triplets), 2)
+        self.assertTrue(any("investigat" in r for r in relations))
+        self.assertTrue(any("prosecut" in r for r in relations))
+
 
 class TestFiltering(unittest.TestCase):
     def test_rejects_identical_head_tail(self):
@@ -160,6 +177,30 @@ class TestVerbalization(unittest.TestCase):
         sentence = verbalize_template(Triplet("victims", "are facing", "online harassment"))
         self.assertIn("victims", sentence)
         self.assertIn("harassment", sentence)
+
+    @mock.patch.dict(os.environ, {}, clear=True)
+    def test_llm_falls_back_to_template_without_api_key(self):
+        triplets = [Triplet("victim", "can file", "an online complaint")]
+        sentences = verbalize_triplets(triplets, backend="llm")
+        self.assertEqual(len(sentences), 1)
+        self.assertIn("victim", sentences[0].lower())
+        self.assertIn("complaint", sentences[0].lower())
+
+    @mock.patch("ktc.verbalization._make_llm_client")
+    def test_llm_verbalization_uses_chat_api(self, mock_make_client):
+        mock_client = mock.Mock()
+        mock_response = mock.Mock()
+        mock_response.choices = [mock.Mock(message=mock.Mock(content="A victim can file an online complaint"))]
+        mock_client.chat.completions.create.return_value = mock_response
+        mock_make_client.return_value = (mock_client, LiveRetrievalConfig(llm_model="test-model"))
+
+        with mock.patch.dict(os.environ, {"LLM_API_KEY": "test-key"}):
+            sentences = verbalize_llm([Triplet("victim", "can file", "an online complaint")])
+
+        self.assertEqual(sentences, ["A victim can file an online complaint."])
+        mock_client.chat.completions.create.assert_called_once()
+        call_kwargs = mock_client.chat.completions.create.call_args.kwargs
+        self.assertEqual(call_kwargs["model"], "test-model")
 
 
 class TestCoreference(unittest.TestCase):

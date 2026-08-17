@@ -58,28 +58,55 @@ def _agent_from_passive(verb_token) -> Optional[object]:
     return None
 
 
-def _subjects_for_verb(verb_token) -> List:
+_RELATIVE_PRONOUNS = frozenset({"who", "which", "that", "whom", "whose"})
+
+
+def _coordination_root(verb_token):
+    """Return the head verb in a coordinated verb phrase chain."""
+    head = verb_token
+    while head.dep_ == "conj" and head.head.pos_ in {"VERB", "AUX"}:
+        head = head.head
+    return head
+
+
+def _resolve_subject_token(subject_token, verb_token):
+    """Map relative-pronoun subjects to their antecedent noun phrase."""
+    if verb_token.dep_ == "relcl" and subject_token.text.lower() in _RELATIVE_PRONOUNS:
+        return verb_token.head
+    return subject_token
+
+
+def _subjects_for_verb(verb_token, inherit_conj: bool = True) -> List:
     subjects = [t for t in verb_token.lefts if t.dep_ in {"nsubj", "nsubjpass", "csubj"}]
     if not subjects:
         subjects = [t for t in verb_token.children if t.dep_ in {"nsubj", "nsubjpass", "csubj"}]
-    return subjects
+    if not subjects and inherit_conj and verb_token.dep_ == "conj":
+        root = _coordination_root(verb_token)
+        if root is not verb_token:
+            subjects = _subjects_for_verb(root, inherit_conj=False)
+    return [_resolve_subject_token(subj, verb_token) for subj in subjects]
 
 
 def _objects_for_verb(verb_token) -> List:
     objects = [
         t
         for t in verb_token.rights
-        if t.dep_ in {"dobj", "pobj", "attr", "dative", "oprd", "acomp", "obj"}
+        if t.dep_ in {"dobj", "pobj", "attr", "dative", "oprd", "acomp", "obj", "xcomp"}
     ]
     if not objects:
         objects = [
-            t for t in verb_token.children if t.dep_ in {"dobj", "pobj", "attr", "obj", "acomp"}
+            t
+            for t in verb_token.children
+            if t.dep_ in {"dobj", "pobj", "attr", "obj", "acomp", "xcomp"}
         ]
+    for child in verb_token.children:
+        if child.dep_ == "prep":
+            objects.extend(t for t in child.children if t.dep_ == "pobj")
     return objects
 
 
 def _triplets_from_verb(verb_token) -> List[Triplet]:
-    """Extract one or more triplets from a single ROOT verb."""
+    """Extract one or more triplets from a single verb token (any clause)."""
     subjects = _subjects_for_verb(verb_token)
     objects = _objects_for_verb(verb_token)
     relation = _relation_span(verb_token)
@@ -127,7 +154,10 @@ def _extract_with_spacy(sentence: str, nlp) -> List[Triplet]:
     triplets: List[Triplet] = []
 
     for token in doc:
-        if token.dep_ != "ROOT" or token.pos_ not in {"VERB", "AUX"}:
+        if token.pos_ not in {"VERB", "AUX"}:
+            continue
+        # Skip auxiliary tokens attached to another verb (e.g. "can" in "can approach").
+        if token.dep_ in {"aux", "auxpass"}:
             continue
         triplets.extend(_triplets_from_verb(token))
 
