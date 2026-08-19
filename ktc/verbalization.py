@@ -161,9 +161,18 @@ def verbalize_llm(
                     {"role": "user", "content": user_prompt},
                 ],
                 temperature=0.2,
-                max_tokens=80,
+                max_tokens=200,
             )
-            sentences.append(_sanitize_llm_sentence(response.choices[0].message.content or ""))
+
+            sentence = _sanitize_llm_sentence(response.choices[0].message.content or "")
+            if not sentence:
+                logger.warning(
+                    "LLM returned empty content for triplet (%r, %r, %r) [finish_reason=%s]; using template",
+                    triplet.head, triplet.relation, triplet.tail,
+                    response.choices[0].finish_reason,
+                )
+                sentence = verbalize_template(triplet)
+            sentences.append(sentence)
         except Exception as exc:
             if fallback_to_template:
                 logger.warning(
