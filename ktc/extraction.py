@@ -82,6 +82,7 @@ def _agent_from_passive(verb_token) -> Optional[object]:
     return None
 
 
+_CORE_OBJ_DEPS = frozenset({"dobj", "obj", "attr", "dative", "oprd", "acomp", "xcomp"})
 _RELATIVE_PRONOUNS = frozenset({"who", "which", "that", "whom", "whose"})
 
 
@@ -111,7 +112,10 @@ def _subjects_for_verb(verb_token, inherit_conj: bool = True) -> List:
     return [_resolve_subject_token(subj, verb_token) for subj in subjects]
 
 
-_CORE_OBJ_DEPS = frozenset({"dobj", "obj", "attr", "dative", "oprd", "acomp", "xcomp"})
+_MEANINGFUL_PREPS = frozenset({"at", "to", "against", "from", "under", "on", "about"})
+# When a direct object already exists, extra prep triples are only locative/oblique.
+# ``to`` is kept for sole-object cases such as ``report to police``, not ``arrange to face``.
+_PREPS_WITH_DOBJ = frozenset({"at", "against", "from", "under", "on", "about"})
 
 
 def _core_objects_for_verb(verb_token) -> List:
@@ -184,14 +188,17 @@ def _triplets_from_verb(verb_token) -> List[Triplet]:
         )
         for obj in tail_tokens:
             for prep_tok, pobj in _noun_prep_pobjs(obj):
+                if prep_tok.text.lower() not in _PREPS_WITH_DOBJ:
+                    continue
                 prep_rel = f"{relation} {prep_tok.text}".strip()
                 triplets.extend(
                     _cartesian_triplets(head_tokens, prep_rel, _expand_conjuncts(pobj))
                 )
 
-    # Locative/oblique arguments keep the preposition on the relation so they
-    # cannot clobber a direct object under the same verb.
+    allowed_preps = _PREPS_WITH_DOBJ if core_objects else _MEANINGFUL_PREPS
     for prep_tok, pobj in prep_pairs:
+        if prep_tok.text.lower() not in allowed_preps:
+            continue
         prep_rel = f"{relation} {prep_tok.text}".strip()
         triplets.extend(_cartesian_triplets(head_tokens, prep_rel, _expand_conjuncts(pobj)))
 
@@ -226,11 +233,29 @@ def extract_triplets(knowledge_text: str, backend: str = "spacy", nlp=None) -> L
         else:
             raise ValueError(f"Unsupported OpenIE backend: {backend}")
 
-    deduped = []
+    return _dedupe_triplets(triplets)
+
+
+_CONTENT_STOP = frozenset({"a", "an", "the"})
+
+
+def _content_tokens(text: str) -> tuple:
+    words = re.findall(r"[a-z0-9]+", (text or "").lower())
+    return tuple(w for w in words if w not in _CONTENT_STOP)
+
+
+def _dedupe_triplets(triplets: Iterable[Triplet]) -> List[Triplet]:
+    """Drop exact and near-duplicate triples (articles/punctuation ignored)."""
+    deduped: List[Triplet] = []
     seen = set()
     for triplet in triplets:
-        key = (triplet.head.lower(), triplet.relation.lower(), triplet.tail.lower())
-        if key not in seen:
-            seen.add(key)
-            deduped.append(triplet)
+        key = (
+            _content_tokens(triplet.head),
+            _content_tokens(triplet.relation),
+            _content_tokens(triplet.tail),
+        )
+        if not key[0] or not key[1] or not key[2] or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(triplet)
     return deduped

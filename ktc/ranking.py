@@ -46,6 +46,30 @@ def _stable_rank_order(scores: np.ndarray, top_k: int) -> np.ndarray:
     return np.lexsort((indices, -scores))[:top_k]
 
 
+DEFAULT_TOP_K = 5
+DEFAULT_MIN_SCORE = 0.38
+
+
+def apply_score_gate(
+    candidates: List[KnowledgeCandidate],
+    scores: List[float],
+    min_score: float = DEFAULT_MIN_SCORE,
+    max_k: int = DEFAULT_TOP_K,
+) -> CandidateRankingResult:
+    """Keep only ranked items at/above *min_score*, capped at *max_k*."""
+    kept_c: List[KnowledgeCandidate] = []
+    kept_s: List[float] = []
+    for candidate, score in zip(candidates, scores):
+        if score < min_score:
+            continue
+        kept_c.append(candidate)
+        kept_s.append(score)
+        if len(kept_c) >= max_k:
+            break
+    top1 = kept_s[0] if kept_s else 0.0
+    return CandidateRankingResult(candidates=kept_c, scores=kept_s, top1_score=top1)
+
+
 class SentenceBertRanker:
     def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
         from sentence_transformers import SentenceTransformer
@@ -141,23 +165,31 @@ class CrossEncoderReranker:
 def rank_triplets(
     dialog_history: str,
     triplets: Iterable[Triplet],
-    top_k: int = 26,
+    top_k: int = DEFAULT_TOP_K,
     ranker: Optional[SentenceBertRanker] = None,
+    min_score: float = DEFAULT_MIN_SCORE,
 ) -> Tuple[List[Triplet], float]:
-    """Rank triplets by cosine similarity to dialog history; return (ranked, top1_score)."""
+    """Rank triplets by cosine similarity to the ranking query; gate on *min_score*."""
     if ranker is None:
         ranker = SentenceBertRanker()
-    result = ranker.rank_with_scores(dialog_history, triplets, top_k=top_k)
-    return result.triplets, result.top1_score
+    triplet_list = list(triplets)
+    result = ranker.rank_with_scores(dialog_history, triplet_list, top_k=max(top_k, len(triplet_list)))
+    candidates = [KnowledgeCandidate(text=t.as_text(), source="static_dataset", triplet=t) for t in result.triplets]
+    gated = apply_score_gate(candidates, result.scores, min_score=min_score, max_k=top_k)
+    ranked = [c.triplet for c in gated.candidates if c.triplet is not None]
+    return ranked, gated.top1_score
 
 
 def rank_candidates(
     dialog_history: str,
     candidates: Iterable[KnowledgeCandidate],
-    top_k: int = 26,
+    top_k: int = DEFAULT_TOP_K,
     ranker: Optional[CandidateRanker] = None,
+    min_score: float = DEFAULT_MIN_SCORE,
 ) -> Tuple[List[KnowledgeCandidate], float]:
     if ranker is None:
         ranker = SentenceBertRanker()
-    result = ranker.rank_candidates_with_scores(dialog_history, candidates, top_k=top_k)
-    return result.candidates, result.top1_score
+    pool = list(candidates)
+    result = ranker.rank_candidates_with_scores(dialog_history, pool, top_k=max(top_k, len(pool)))
+    gated = apply_score_gate(result.candidates, result.scores, min_score=min_score, max_k=top_k)
+    return gated.candidates, gated.top1_score

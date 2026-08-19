@@ -29,14 +29,14 @@ def main():
     parser.add_argument(
         "--enable-live",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Include hybrid live retrieval candidates (default: on).",
+        default=False,
+        help="Include hybrid live retrieval candidates (default: off).",
     )
     parser.add_argument(
         "--coref-backend",
-        choices=["heuristic", "model"],
-        default="heuristic",
-        help="Coreference backend (heuristic avoids coreferee install for demos).",
+        choices=["none", "heuristic", "model"],
+        default="none",
+        help="Coreference backend (none is safest on long scraped KARE knowledge).",
     )
     parser.add_argument(
         "--verbalization-backend",

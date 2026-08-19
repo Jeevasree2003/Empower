@@ -52,7 +52,12 @@ _MASCULINE_HINTS = frozenset(
 )
 
 # How many preceding sentences the heuristic searches (same sentence always first).
-MAX_ANTECEDENT_LOOKBACK = 3
+MAX_ANTECEDENT_LOOKBACK = 1
+# Long scraped KARE blobs: skip heuristic rather than invent antecedents.
+HEURISTIC_MAX_CHARS = 1500
+_VAGUE_NEUTER_LEMMAS = frozenset(
+    {"deal", "way", "thing", "one", "step", "matter", "episode", "issue", "it"}
+)
 
 
 def _sentences(text: str, nlp) -> List:
@@ -97,12 +102,31 @@ def _pronoun_token_index(sent_doc, head: str) -> Optional[int]:
 
 def _find_source_sentence(triplet: Triplet, sent_docs: Sequence) -> Optional[object]:
     head_lower = triplet.head.lower()
+    relation_lower = triplet.relation.lower()
+    tail_lower = triplet.tail.lower()
+
+    def _score(sent_doc) -> int:
+        text = sent_doc.text.lower()
+        if head_lower not in text:
+            return 0
+        score = 1
+        if relation_lower and relation_lower in text:
+            score += 2
+        if tail_lower and tail_lower in text:
+            score += 2
+        return score
+
+    best_doc = None
+    best_score = 0
     for sent_doc in sent_docs:
-        if head_lower in sent_doc.text.lower():
-            return sent_doc
+        score = _score(sent_doc)
+        if score > best_score:
+            best_score = score
+            best_doc = sent_doc
+    if best_score > 0:
+        return best_doc
 
     head_tokens = set(head_lower.split())
-    best_doc = None
     best_overlap = 0
     for sent_doc in sent_docs:
         sent_tokens = set(sent_doc.text.lower().split())
@@ -136,10 +160,13 @@ def _chunk_compatible(chunk, pronoun_class: str) -> bool:
             return True
         if any(t.text.endswith("s") and t.pos_ in {"NOUN", "PROPN"} for t in chunk):
             return True
-        return chunk.root.pos_ in {"NOUN", "PROPN"}
+        return False
 
-    # neuter: prefer non-person referents
+    # neuter: prefer non-person referents; skip vague copula complements
     if chunk.root.ent_type_ == "PERSON":
+        return False
+    lemma = getattr(chunk.root, "lemma_", chunk.root.text).lower()
+    if lemma in _VAGUE_NEUTER_LEMMAS:
         return False
     return chunk.root.pos_ in {"NOUN", "PROPN"}
 
@@ -348,27 +375,34 @@ def resolve_coreferences(
     triplets: Iterable[Triplet],
     knowledge_text: str,
     nlp=None,
-    backend: str = "heuristic",
+    backend: str = "none",
 ) -> List[Triplet]:
     """Replace pronoun heads with antecedent noun phrases.
 
     Parameters
     ----------
     backend:
-        ``heuristic`` — sentence-local search (default, no extra deps).
+        ``none`` — leave pronouns unresolved (default for long scraped knowledge).
+        ``heuristic`` — same/previous sentence only; skipped on long documents.
         ``model`` — coreferee spaCy component (``pip install coreferee``).
     """
+    if backend in {"none", "off", "disabled"}:
+        return list(triplets)
+
     if nlp is None:
         import spacy
 
         nlp = spacy.load("en_core_web_sm")
 
     if backend == "heuristic":
+        if len(knowledge_text or "") > HEURISTIC_MAX_CHARS:
+            logger.info("skipping heuristic coref on long knowledge (%s chars)", len(knowledge_text or ""))
+            return list(triplets)
         return _resolve_heuristic(triplets, knowledge_text, nlp)
     if backend == "model":
         try:
             return _resolve_model(triplets, knowledge_text, nlp)
         except ImportError:
-            logger.warning("coreferee unavailable; falling back to heuristic coreference")
-            return _resolve_heuristic(triplets, knowledge_text, nlp)
+            logger.warning("coreferee unavailable; leaving pronouns unresolved")
+            return list(triplets)
     raise ValueError(f"Unsupported coreference backend: {backend}")

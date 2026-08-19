@@ -13,7 +13,9 @@ from ktc.filtering import filter_triplets
 from ktc.knowledge_item import KnowledgeCandidate
 from ktc.live_config import ApiCallBudget, LiveRetrievalConfig
 from ktc.live_knowledge import fetch_live_knowledge, static_candidates_from_triplets, victim_utterance_from_history
-from ktc.ranking import CandidateRanker, SentenceBertRanker, rank_candidates, rank_triplets
+from ktc.passages import select_relevant_passages
+from ktc.ranking import DEFAULT_MIN_SCORE, DEFAULT_TOP_K, CandidateRanker, SentenceBertRanker, rank_candidates
+from ktc.ranking_query import build_ranking_query
 from ktc.triplet import Triplet
 from ktc.verbalization import verbalize_triplets
 
@@ -30,9 +32,11 @@ class HybridRunResult:
 class KnowledgeTripletPipeline:
     """Run stages 2a–2e for one dialog turn, optionally augmented with live retrieval."""
 
-    top_k: int = 26
+    top_k: int = DEFAULT_TOP_K
+    min_score: float = DEFAULT_MIN_SCORE
+    max_passages: int = 3
     openie_backend: str = "spacy"
-    coref_backend: str = "model"
+    coref_backend: str = "none"
     verbalization_backend: str = "llm"
     ranker: Optional[CandidateRanker] = field(default=None, repr=False)
     _nlp: Optional[object] = field(default=None, repr=False)
@@ -56,16 +60,41 @@ class KnowledgeTripletPipeline:
             self.ranker = SentenceBertRanker()
         return self.ranker
 
-    def get_filtered_triplets(self, knowledge_text: str) -> List[Triplet]:
-        """Run cleaning → extraction → coreference → filtering; cache by knowledge hash."""
-        digest = hashlib.sha256((knowledge_text or "").encode("utf-8")).hexdigest()
-        if digest not in self._knowledge_cache:
-            cleaned = clean_knowledge_text(knowledge_text)
-            nlp = self._get_nlp()
-            raw = extract_triplets(cleaned, backend=self.openie_backend, nlp=nlp)
-            resolved = resolve_coreferences(raw, cleaned, nlp=nlp, backend=self.coref_backend)
-            self._knowledge_cache[digest] = filter_triplets(resolved)
-        return self._knowledge_cache[digest]
+    def get_filtered_triplets(
+        self,
+        knowledge_text: str,
+        ranking_query: str = "",
+    ) -> List[Triplet]:
+        """Clean → keep relevant passages → extract → optional coref → filter."""
+        cache_key = hashlib.sha256(
+            f"{knowledge_text or ''}\n{ranking_query or ''}\n{self.coref_backend}".encode("utf-8")
+        ).hexdigest()
+        if cache_key in self._knowledge_cache:
+            return self._knowledge_cache[cache_key]
+
+        if not (ranking_query or "").strip():
+            self._knowledge_cache[cache_key] = []
+            return []
+
+        passages, _scores = select_relevant_passages(
+            knowledge_text,
+            ranking_query,
+            self._get_ranker(),
+            max_passages=self.max_passages,
+        )
+        if not passages:
+            self._knowledge_cache[cache_key] = []
+            return []
+
+        nlp = self._get_nlp()
+        combined: List[Triplet] = []
+        for passage in passages:
+            raw = extract_triplets(passage, backend=self.openie_backend, nlp=nlp)
+            resolved = resolve_coreferences(raw, passage, nlp=nlp, backend=self.coref_backend)
+            combined.extend(filter_triplets(resolved))
+
+        self._knowledge_cache[cache_key] = combined
+        return combined
 
     def _verbalize_candidates(self, ranked: List[KnowledgeCandidate]) -> List[str]:
         result: List[Optional[str]] = [None] * len(ranked)
@@ -124,26 +153,42 @@ class KnowledgeTripletPipeline:
         filtered: Optional[List[Triplet]] = None,
         enable_live: Optional[bool] = None,
     ) -> HybridRunResult:
+        ranking_query = build_ranking_query(dialog_history, nlp=self._get_nlp())
         if filtered is None:
-            filtered = self.get_filtered_triplets(knowledge_text)
+            filtered = self.get_filtered_triplets(knowledge_text, ranking_query=ranking_query)
 
         pool = static_candidates_from_triplets(filtered)
         live_on = self.live_config.enable_live_retrieval if enable_live is None else enable_live
 
         if live_on:
+            from dataclasses import replace
+
+            live_cfg = self.live_config
+            if not live_cfg.enable_live_retrieval:
+                live_cfg = replace(self.live_config, enable_live_retrieval=True)
             victim_text = victim_utterance_from_history(dialog_history)
             live_candidates, _queries, _raw = fetch_live_knowledge(
                 victim_text,
-                self.live_config,
+                live_cfg,
                 self.api_budget,
                 nlp=self._get_nlp(),
             )
             pool.extend(live_candidates)
 
+        if not pool:
+            return HybridRunResult(
+                verbalized=[],
+                top1_similarity_score=0.0,
+                ranked_candidates=[],
+                live_enabled=live_on,
+            )
+
+        query_for_rank = ranking_query or dialog_history
         ranked, top1_score = rank_candidates(
-            dialog_history,
+            query_for_rank,
             pool,
             top_k=self.top_k,
+            min_score=self.min_score,
             ranker=self._get_ranker(),
         )
         verbalized = self._verbalize_candidates(ranked)
@@ -159,10 +204,25 @@ class KnowledgeTripletPipeline:
         return [text] if text else []
 
     def inspect(self, knowledge_text: str, dialog_history: str, enable_live: Optional[bool] = None) -> dict:
-        cleaned = clean_knowledge_text(knowledge_text)
+        ranking_query = build_ranking_query(dialog_history, nlp=self._get_nlp())
+        if ranking_query.strip():
+            passages, passage_scores = select_relevant_passages(
+                knowledge_text,
+                ranking_query,
+                self._get_ranker(),
+                max_passages=self.max_passages,
+            )
+        else:
+            passages, passage_scores = [], []
         nlp = self._get_nlp()
-        raw = extract_triplets(cleaned, backend=self.openie_backend, nlp=nlp)
-        resolved = resolve_coreferences(raw, cleaned, nlp=nlp, backend=self.coref_backend)
+        raw: List[Triplet] = []
+        resolved: List[Triplet] = []
+        for passage in passages:
+            passage_raw = extract_triplets(passage, backend=self.openie_backend, nlp=nlp)
+            raw.extend(passage_raw)
+            resolved.extend(
+                resolve_coreferences(passage_raw, passage, nlp=nlp, backend=self.coref_backend)
+            )
         filtered = filter_triplets(resolved)
         hybrid = self.run_hybrid(
             knowledge_text,
@@ -170,8 +230,12 @@ class KnowledgeTripletPipeline:
             filtered=filtered,
             enable_live=enable_live,
         )
+        cleaned = clean_knowledge_text(knowledge_text)
         return {
             "cleaned_knowledge_preview": cleaned[:500],
+            "ranking_query": ranking_query,
+            "selected_passages": passages,
+            "passage_scores": passage_scores,
             "raw_triplets": [t.to_dict() for t in raw],
             "resolved_triplets": [t.to_dict() for t in resolved],
             "filtered_triplets": [t.to_dict() for t in filtered],

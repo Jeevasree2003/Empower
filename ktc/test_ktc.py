@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -156,6 +157,20 @@ class TestExtraction(unittest.TestCase):
             msg=f"expected lodge-at + police station, got {[(t.relation, t.tail) for t in triplets]}",
         )
 
+    def test_skips_unmeaningful_prep_when_direct_object_exists(self):
+        triplets = self._extract(
+            "A more mature senior can arrange a face to face meeting with your harasser."
+        )
+        self.assertFalse(
+            any(t.relation.lower().endswith(" to") and t.tail.lower() == "face" for t in triplets),
+            msg=repr([(t.relation, t.tail) for t in triplets]),
+        )
+
+    def test_semantic_dedup_ignores_articles(self):
+        triplets = self._extract("The victim filed a complaint. A victim filed the complaint.")
+        keys = {(t.head.lower(), t.relation.lower(), t.tail.lower()) for t in triplets}
+        self.assertLessEqual(len(triplets), len(keys) + 2)
+
 
 class TestFiltering(unittest.TestCase):
     def test_rejects_identical_head_tail(self):
@@ -189,6 +204,30 @@ class TestFiltering(unittest.TestCase):
     def test_rejects_stopword_only_relation(self):
         triplet = Triplet("police station", "to the", "complaint desk")
         self.assertFalse(passes_filters(triplet))
+
+    def test_rejects_bare_prep_copula(self):
+        self.assertFalse(passes_filters(Triplet("Singh", "was of", "an elaborate scam")))
+        self.assertFalse(passes_filters(Triplet("the investigation", "is to", "your notice")))
+
+    def test_rejects_repeated_token_artifact(self):
+        self.assertFalse(passes_filters(Triplet("Do Yoga Yoga", "is", "one")))
+
+    def test_rejects_boilerplate_and_dates(self):
+        self.assertFalse(
+            passes_filters(Triplet("Team Online Legal India", "will be in", "touch with you"))
+        )
+        self.assertFalse(
+            passes_filters(Triplet("law", "pressurized", "mentally harrasment 25 Jan , 2022 Hi Tejal"))
+        )
+
+    def test_rejects_overlong_tail(self):
+        tail = "your notice that i kinjal singh is getting bullied by my fellow school mates by making my fake instagram account"
+        self.assertFalse(passes_filters(Triplet("the investigation", "is", tail)))
+
+    def test_rejects_near_duplicate_head_tail(self):
+        self.assertFalse(
+            passes_filters(Triplet("a person who belong to rajasthan", "belong to", "rajasthan"))
+        )
 
 
 class TestVerbalization(unittest.TestCase):
@@ -255,7 +294,7 @@ class TestCoreference(unittest.TestCase):
         cls.nlp = spacy.load("en_core_web_sm")
 
     def _resolve(self, knowledge: str, triplets: list[Triplet]) -> list[Triplet]:
-        return resolve_coreferences(triplets, knowledge, nlp=self.nlp)
+        return resolve_coreferences(triplets, knowledge, nlp=self.nlp, backend="heuristic")
 
     def test_same_sentence_antecedent(self):
         knowledge = "John filed the complaint because he was listed as a witness."
@@ -271,11 +310,42 @@ class TestCoreference(unittest.TestCase):
         self.assertEqual(len(resolved), 1)
         self.assertIn("Maria", resolved[0].head)
 
-    def test_two_sentence_lookback(self):
+    def test_lookback_does_not_skip_over_previous_sentence(self):
         knowledge = "Ravi contacted the helpline. He was scared. He filed a complaint."
         raw = [Triplet("He", "filed", "a complaint")]
         resolved = self._resolve(knowledge, raw)
-        self.assertIn("Ravi", resolved[0].head)
+        self.assertNotIn("Ravi", resolved[0].head)
+
+    def test_default_backend_leaves_pronouns(self):
+        knowledge = "Maria called the police. She filed an online complaint."
+        raw = [Triplet("She", "filed", "an online complaint")]
+        resolved = resolve_coreferences(raw, knowledge, nlp=self.nlp)
+        self.assertEqual(resolved[0].head, "She")
+
+    def test_they_does_not_resolve_to_law(self):
+        knowledge = "The law is strict. They called me at 9 pm without reason."
+        raw = [Triplet("they", "called", "me")]
+        resolved = self._resolve(knowledge, raw)
+        self.assertNotIn("law", resolved[0].head.lower())
+
+    def test_it_does_not_resolve_to_a_big_deal(self):
+        knowledge = "Dealing with stress is not a big deal. It is best to set a routine."
+        raw = [Triplet("it", "is", "best")]
+        resolved = self._resolve(knowledge, raw)
+        self.assertNotIn("big deal", resolved[0].head.lower())
+
+    def test_we_does_not_resolve_to_the_matter(self):
+        knowledge = "A senior can diffuse the matter. We have received your complaint request."
+        raw = [Triplet("We", "have received", "your complaint request")]
+        resolved = self._resolve(knowledge, raw)
+        self.assertNotEqual(resolved[0].head.lower(), "the matter")
+
+    def test_heuristic_skips_long_scraped_text(self):
+        knowledge = ("The investment scheme is risky. " * 80) + "It is the small step towards awareness."
+        self.assertGreater(len(knowledge), 1500)
+        raw = [Triplet("It", "is", "the small step towards awareness")]
+        resolved = resolve_coreferences(raw, knowledge, nlp=self.nlp, backend="heuristic")
+        self.assertEqual(resolved[0].head, "It")
 
     def test_single_candidate_fallback_rejects_mistagged_pronoun(self):
         from ktc.coreference import _pick_antecedent
@@ -292,12 +362,12 @@ class TestCoreference(unittest.TestCase):
 
         priya = Chunk("Priya", "PROPN", "PERSON")
         mistagged_she = Chunk("She", "NOUN", "")
-        sents = [[priya], [mistagged_she], []]
+        sents = [[priya], [mistagged_she]]
         with mock.patch(
             "ktc.coreference._collect_candidates",
             side_effect=lambda sent_doc, before_char=None: list(sent_doc),
         ):
-            chosen = _pick_antecedent(sents, sent_idx=2, pronoun_char=None, pronoun_class="fem")
+            chosen = _pick_antecedent(sents, sent_idx=1, pronoun_char=None, pronoun_class="fem")
         self.assertEqual(chosen, "Priya")
 
     def test_ambiguous_gender_requires_person_antecedent(self):
@@ -333,7 +403,7 @@ class TestCoreference(unittest.TestCase):
                 self.assertIsNotNone(dialogue)
                 cleaned = clean_knowledge_text(dialogue["knowledge"])
                 raw = extract_triplets(cleaned, nlp=self.nlp)
-                resolved = resolve_coreferences(raw, cleaned, nlp=self.nlp)
+                resolved = resolve_coreferences(raw, cleaned, nlp=self.nlp, backend="heuristic")
                 bad_heads = [t.head for t in resolved if t.head in BAD_COREF_HEADS]
                 self.assertEqual(
                     bad_heads,
@@ -786,6 +856,39 @@ class TestNltkSetup(unittest.TestCase):
         self.assertIn("scripts/setup_nltk.py", setup_command())
 
 
+class _KeepAllRanker:
+    def rank_candidates_with_scores(self, dialog_history, candidates, top_k=26):
+        from ktc.ranking import CandidateRankingResult
+
+        candidate_list = list(candidates)[:top_k]
+        scores = [0.9] * len(candidate_list)
+        return CandidateRankingResult(
+            candidates=candidate_list,
+            scores=scores,
+            top1_score=scores[0] if scores else 0.0,
+        )
+
+
+class _KeywordOverlapRanker:
+    def rank_candidates_with_scores(self, dialog_history, candidates, top_k=26):
+        from ktc.ranking import CandidateRankingResult
+
+        query_tokens = set(re.findall(r"[a-z0-9]+", (dialog_history or "").lower()))
+        scored = []
+        for cand in candidates:
+            tokens = set(re.findall(r"[a-z0-9]+", cand.text.lower()))
+            score = len(query_tokens & tokens) / max(1, len(query_tokens))
+            scored.append((score, cand))
+        scored.sort(key=lambda item: -item[0])
+        ranked = [c for _, c in scored[:top_k]]
+        scores = [s for s, _ in scored[:top_k]]
+        return CandidateRankingResult(
+            candidates=ranked,
+            scores=scores,
+            top1_score=scores[0] if scores else 0.0,
+        )
+
+
 class TestPipelineIntegration(unittest.TestCase):
     def test_config_defaults_live_retrieval_off(self):
         config = LiveRetrievalConfig.load()
@@ -800,6 +903,7 @@ class TestPipelineIntegration(unittest.TestCase):
             pipeline = KnowledgeTripletPipeline(
                 verbalization_backend="template",
                 coref_backend="heuristic",
+                ranker=_KeepAllRanker(),
             )
             sentences = pipeline.run(knowledge, history, enable_live=False)
         fetch.assert_not_called()
@@ -814,6 +918,7 @@ class TestPipelineIntegration(unittest.TestCase):
             pipeline = KnowledgeTripletPipeline(
                 verbalization_backend="template",
                 coref_backend="heuristic",
+                ranker=_KeepAllRanker(),
             )
             pipeline.run(
                 "Victims can file a complaint online.",
@@ -830,6 +935,7 @@ class TestPipelineIntegration(unittest.TestCase):
             pipeline = KnowledgeTripletPipeline(
                 verbalization_backend="template",
                 coref_backend="heuristic",
+                ranker=_KeepAllRanker(),
             )
             pipeline.run(
                 "Victims can file a complaint.",
@@ -839,6 +945,84 @@ class TestPipelineIntegration(unittest.TestCase):
         fetch.assert_called_once()
         victim_arg = fetch.call_args[0][0]
         self.assertIn("raped", victim_arg.lower())
+
+
+class TestRelevanceOverhaul(unittest.TestCase):
+    def test_apply_score_gate_drops_low_scores_and_caps_k(self):
+        from ktc.ranking import apply_score_gate
+
+        candidates = [KnowledgeCandidate(text=f"item-{i}", source="static_dataset") for i in range(6)]
+        scores = [0.21, 0.40, 0.50, 0.30, 0.39, 0.90]
+        gated = apply_score_gate(candidates, scores, min_score=0.38, max_k=3)
+        self.assertEqual([c.text for c in gated.candidates], ["item-1", "item-2", "item-4"])
+        self.assertEqual(gated.top1_score, 0.40)
+
+    def test_greeting_only_returns_no_static_knowledge(self):
+        from ktc.pipeline import KnowledgeTripletPipeline
+
+        pipeline = KnowledgeTripletPipeline(
+            verbalization_backend="template",
+            ranker=_KeepAllRanker(),
+        )
+        knowledge = "Once you will see that you are having a slow life, dealing with stress is not a big deal."
+        history = "bot: Good morning from Rakshak ! How may I help you today ?"
+        result = pipeline.run_hybrid(knowledge, history, enable_live=False)
+        self.assertEqual(result.verbalized, [])
+        self.assertEqual(result.ranked_candidates, [])
+
+    def test_ranking_query_uses_user_role_not_bot_greeting(self):
+        from ktc.ranking_query import build_ranking_query
+
+        query = build_ranking_query(
+            "bot: Good morning from Rakshak. user: my husband is planning to kill me with her secretary."
+        )
+        self.assertIn("kill", query.lower())
+        self.assertNotIn("rakshak", query.lower())
+
+    def _load_dialogue(self, dialogue_id: str):
+        if not DATA_PATH.exists():
+            self.skipTest("KARE.jsonl not available (set KARE_JSONL_PATH)")
+        with DATA_PATH.open(encoding="utf-8") as f:
+            for line in f:
+                record = json.loads(line)
+                if str(record["dialogue_id"]) == str(dialogue_id):
+                    return record
+        self.skipTest(f"dialogue {dialogue_id} not in KARE.jsonl")
+
+    def test_e2e_dialogues_100_500_3000_do_not_force_26_candidates(self):
+        from ktc.pipeline import KnowledgeTripletPipeline
+        from ktc.ranking_query import build_ranking_query
+
+        cases = {
+            "100": ("bot: Good morning from Rakshak ! How may I help you today ?", True),
+            "500": (
+                "bot: Hi , this is Rakshak to help you in a secure environment. user: I need legal help about workplace harassment.",
+                False,
+            ),
+            "3000": (
+                "bot: Welcome to Rakshak. user: Hi Rakshak, my husband is planning to kill me with her secretary. Please help.",
+                False,
+            ),
+        }
+        for did, (history, greeting_only) in cases.items():
+            with self.subTest(dialogue_id=did):
+                dialogue = self._load_dialogue(did)
+                pipeline = KnowledgeTripletPipeline(
+                    verbalization_backend="template",
+                    coref_backend="none",
+                    ranker=_KeywordOverlapRanker(),
+                )
+                result = pipeline.run_hybrid(dialogue["knowledge"], history, enable_live=False)
+                self.assertLessEqual(len(result.ranked_candidates), 5)
+                if greeting_only:
+                    self.assertEqual(result.verbalized, [])
+                    continue
+                query = build_ranking_query(history)
+                self.assertTrue(query.strip())
+                joined = " ".join(result.verbalized).lower()
+                self.assertNotIn("kinjal singh", joined)
+                self.assertNotIn("do yoga yoga", joined)
+                self.assertNotIn("team online legal india", joined)
 
 
 if __name__ == "__main__":

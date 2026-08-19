@@ -179,15 +179,30 @@ def verbalize_llm(
     return sentences
 
 
+def sentence_preserves_triplet(sentence: str, triplet: Triplet) -> bool:
+    """True when the sentence still contains most content tokens from the triple."""
+    lowered = (sentence or "").lower()
+    for part in (triplet.head, triplet.relation, triplet.tail):
+        tokens = [w for w in re.findall(r"[a-z0-9]+", part.lower()) if w not in {"a", "an", "the"}]
+        if not tokens:
+            continue
+        hits = sum(1 for tok in tokens if tok in lowered)
+        if hits < max(1, (len(tokens) + 1) // 2):
+            return False
+    return bool(re.search(r"[.!?]$", (sentence or "").strip()))
+
+
 def verbalize_triplets(triplets: Iterable[Triplet], backend: str = "llm", **kwargs) -> List[str]:
     triplet_list = list(triplets)
     if backend == "template":
-        return [verbalize_template(t) for t in triplet_list]
-    if backend == "llm":
-        return verbalize_llm(
+        raw = [verbalize_template(t) for t in triplet_list]
+    elif backend == "llm":
+        raw = verbalize_llm(
             triplet_list,
             model=kwargs.get("model"),
             llm_config=kwargs.get("llm_config"),
             fallback_to_template=kwargs.get("fallback_to_template", True),
         )
-    raise ValueError(f"Unsupported verbalization backend: {backend}")
+    else:
+        raise ValueError(f"Unsupported verbalization backend: {backend}")
+    return [s for s, t in zip(raw, triplet_list) if sentence_preserves_triplet(s, t)]
