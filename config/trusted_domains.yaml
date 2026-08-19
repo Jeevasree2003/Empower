@@ -10,6 +10,17 @@ government_legal:
   - nalsa.gov.in
   - india.gov.in
   - meity.gov.in
+  - legislative.gov.in
+  - lawmin.gov.in
+  - nhrc.nic.in
+  - ncpcr.gov.in
+  - indiankanoon.org
+  - prsindia.org
+
+legal_reference:
+  - livelaw.in
+  - barandbench.com
+  - ipleaders.in
 
 health_medical:
   - who.int
@@ -22,3 +33,4 @@ ngo_support:
   - icallhelpline.org
   - sangath.in
   - snehaindia.org
+  - childlineindia.org
