@@ -21,6 +21,8 @@ class LiveRetrievalConfig:
     cache_ttl_days: int = 30
     results_per_query: int = 5
     search_provider: str = "tavily"
+    # extractive = no LLM (no Groq quota); llm = Groq/OpenAI with extractive fallback on errors.
+    summarize_backend: str = "extractive"
     llm_model: str = "gpt-4o-mini"
     llm_api_base: str = ""
     estimated_cost_per_dialogue_usd: float = 0.03
@@ -57,6 +59,7 @@ class LiveRetrievalConfig:
             cache_ttl_days=int(data.get("cache_ttl_days", 30)),
             results_per_query=int(data.get("results_per_query", 5)),
             search_provider=str(data.get("search_provider", "tavily")),
+            summarize_backend=str(data.get("summarize_backend", "extractive") or "extractive"),
             llm_model=str(data.get("llm_model", "gpt-4o-mini")),
             llm_api_base=str(data.get("llm_api_base", "") or ""),
             estimated_cost_per_dialogue_usd=float(data.get("estimated_cost_per_dialogue_usd", 0.03)),

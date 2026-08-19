@@ -1,6 +1,6 @@
 # Live knowledge retrieval guardrails and toggles.
 
-enable_live_retrieval: false
+enable_live_retrieval: true
 
 # Per-dialogue cap on distinct search queries (entity-driven).
 max_live_queries_per_dialogue: 6
@@ -16,6 +16,11 @@ results_per_query: 5
 
 # Search backend: tavily (default) or serpapi
 search_provider: tavily
+
+# How to turn search hits into live_api sentences.
+# extractive = local sentence selection from page/snippet (no Groq quota).
+# llm = Groq/OpenAI summarization; falls back to extractive on 429/errors.
+summarize_backend: extractive
 
 # LLM used for live page summarization (OpenAI-compatible API).
 llm_model: openai/gpt-oss-120b

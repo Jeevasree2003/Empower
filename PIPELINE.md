@@ -16,9 +16,10 @@ cp .env.example .env
 
 - `.env` is listed in `.gitignore` and is **never committed** — safe for secrets.
 - Keys are read via `os.environ` (`LIVE_SEARCH_API_KEY`, `LLM_API_KEY`, optional `LLM_API_BASE`).
-- Summarization uses an **OpenAI-compatible client** pointed at Groq by default
-  (`llm_api_base: https://api.groq.com/openai/v1`, `llm_model: openai/gpt-oss-120b` in
-  `config/live_retrieval_config.yaml`). Set `LLM_API_KEY` to your Groq API key.
+- Live search uses `LIVE_SEARCH_API_KEY` (Tavily). Turning hits into sentences uses
+  **extractive** selection by default (`summarize_backend: extractive`) so Groq quota
+  cannot empty the live pool. Optional `summarize_backend: llm` still uses `LLM_API_KEY`
+  (Groq) and falls back to extractive on 429.
 - Entry scripts call `load_dotenv()` **before** importing `ktc` live modules, so the
   environment is populated when `LiveRetrievalConfig.load()` or `search_allowlisted()` run.
 - Standard preprocessing (`scripts/preprocess_kare.py`) is **static KTC** (live retrieval
@@ -31,7 +32,6 @@ Install dependencies (includes `python-dotenv`):
 
 ```bash
 pip install -r requirements.txt
-python -m spacy download en_core_web_sm
 python scripts/setup_nltk.py
 ```
 
@@ -166,12 +166,14 @@ Run KTC tests:
 python -m unittest ktc.test_ktc
 ```
 
-Inspect a dialogue (hybrid static + live; needs `LLM_API_KEY` and `LIVE_SEARCH_API_KEY`):
+Inspect a dialogue (hybrid static + live). Search needs `LIVE_SEARCH_API_KEY`.
+Page-to-sentence conversion defaults to **extractive** (no Groq). Set
+`summarize_backend: llm` only if you want Groq summarization.
 
 ```bash
 python scripts/inspect_ktc.py \
   --input ../../KARE-data/KARE/Data/KARE.jsonl \
-  --dialogue_id 1 \
+  --dialogue_id 3437 \
   --turn 0
 ```
 
@@ -186,7 +188,6 @@ python scripts/inspect_samples.py --input ../../KARE-data/KARE/Data/KARE.jsonl
 ```bash
 cd EMPOWER-KARE
 pip install -r requirements.txt
-python -m spacy download en_core_web_sm
 python scripts/setup_nltk.py
 
 python scripts/preprocess_kare.py \

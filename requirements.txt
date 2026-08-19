@@ -4,7 +4,8 @@ transformers>=4.30,<5.0
 rouge_score
 sacrebleu
 nltk
-spacy
+spacy==3.8.14
+en-core-web-sm==3.8.0
 sentence-transformers
 numpy
 pyyaml
@@ -15,5 +16,5 @@ python-dotenv
 openai
 
 # After install:
-# python -m spacy download en_core_web_sm
 # python scripts/setup_nltk.py
+# en-core-web-sm is pinned above (compatible with spacy==3.8.14); no extra download step.

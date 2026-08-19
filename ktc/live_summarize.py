@@ -35,6 +35,69 @@ _META_COMMENTARY_PATTERN = re.compile(
     r"(the source does not|this page does not|no information is provided|the text does not mention)",
     re.IGNORECASE,
 )
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
+_QUERY_STOPWORDS = frozenset(
+    {
+        "how",
+        "to",
+        "the",
+        "a",
+        "an",
+        "in",
+        "of",
+        "for",
+        "and",
+        "or",
+        "on",
+        "at",
+        "is",
+        "what",
+        "india",
+        "official",
+        "current",
+        "latest",
+        "under",
+    }
+)
+
+
+def _query_tokens(query: str) -> set:
+    return {
+        tok
+        for tok in re.findall(r"[a-z0-9]+", query.lower())
+        if len(tok) > 2 and tok not in _QUERY_STOPWORDS
+    }
+
+
+def extractive_sentences(query: str, text: str, max_n: int = 3) -> List[str]:
+    """Select query-overlapping sentences from source text. No LLM, no quota."""
+    if not text or not text.strip():
+        return []
+    tokens = _query_tokens(query)
+    ranked: List[tuple] = []
+    for raw in _SENTENCE_SPLIT.split(re.sub(r"\s+", " ", text.strip())):
+        line = raw.strip()
+        if len(line) < 40 or len(line) > 420:
+            continue
+        if _is_meta_commentary(line):
+            continue
+        stoks = set(re.findall(r"[a-z0-9]+", line.lower()))
+        overlap = len(tokens & stoks)
+        if overlap == 0 and not _PHONE_PATTERN.search(line):
+            continue
+        ranked.append((overlap, -abs(180 - len(line)), line))
+    ranked.sort(reverse=True)
+    selected: List[str] = []
+    seen = set()
+    for _, _, line in ranked:
+        key = line.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(line)
+        if len(selected) >= max_n:
+            break
+    return selected
 
 
 @dataclass
@@ -128,33 +191,56 @@ def summarize_search_results(
     config: LiveRetrievalConfig,
     budget: Optional[ApiCallBudget] = None,
 ) -> List[LiveKnowledgeSentence]:
-    """Summarize allowlisted search hits into factual sentences. Never raises."""
+    """Turn allowlisted search hits into factual sentences. Never raises.
+
+    Default path is extractive (no Groq). ``summarize_backend: llm`` uses the API
+    when a key is present and falls back to extractive on errors/429.
+    """
     if not results:
         return []
 
+    backend = (config.summarize_backend or "extractive").strip().lower()
     api_key = os.environ.get("LLM_API_KEY", "").strip()
-    if not api_key:
-        logger.warning("LLM_API_KEY not set; skipping summarization for query=%r", query)
-        return []
+    client = None
+    use_llm = backend == "llm" and bool(api_key)
+    if use_llm:
+        try:
+            from openai import OpenAI  # noqa: F401
 
-    try:
-        from openai import OpenAI  # noqa: F401 — checked by _make_llm_client
-    except ImportError:
-        logger.warning("openai package not installed; skipping summarization for query=%r", query)
-        return []
+            client = _make_llm_client(config)
+        except Exception as exc:
+            logger.warning("llm_client_unavailable; using extractive summarization error=%s", exc)
+            use_llm = False
+            client = None
 
-    client = _make_llm_client(config)
     attributed: List[LiveKnowledgeSentence] = []
 
     for result in results[: config.results_per_query]:
-        if budget is not None and not budget.can_call():
-            logger.warning("API call budget exhausted; skipping remaining summarization for query=%r", query)
-            break
         try:
-            if budget is not None:
-                budget.record(1)
             enriched = enrich_search_result(result, cache_ttl_days=config.cache_ttl_days)
-            sentences = _summarize_one_source(query, enriched, config, client)
+            sentences: List[str] = []
+            if use_llm and client is not None:
+                if budget is not None and not budget.can_call():
+                    logger.warning(
+                        "API call budget exhausted; extractive fallback for query=%r", query
+                    )
+                    sentences = extractive_sentences(query, enriched.snippet)
+                else:
+                    try:
+                        if budget is not None:
+                            budget.record(1)
+                        sentences = _summarize_one_source(query, enriched, config, client)
+                    except Exception as exc:
+                        logger.warning(
+                            "live_summarize_failed query=%r url=%s error=%s; extractive fallback",
+                            query,
+                            result.url,
+                            exc,
+                        )
+                        sentences = extractive_sentences(query, enriched.snippet)
+            else:
+                sentences = extractive_sentences(query, enriched.snippet)
+
             for sentence in sentences:
                 attributed.append(
                     LiveKnowledgeSentence(sentence=sentence, source_url=result.url, query=query)

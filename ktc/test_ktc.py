@@ -277,6 +277,29 @@ class TestCoreference(unittest.TestCase):
         resolved = self._resolve(knowledge, raw)
         self.assertIn("Ravi", resolved[0].head)
 
+    def test_single_candidate_fallback_rejects_mistagged_pronoun(self):
+        from ktc.coreference import _pick_antecedent
+
+        class Root:
+            def __init__(self, pos_, ent_type_=""):
+                self.pos_ = pos_
+                self.ent_type_ = ent_type_
+
+        class Chunk:
+            def __init__(self, text, pos_, ent_type_=""):
+                self.text = text
+                self.root = Root(pos_, ent_type_)
+
+        priya = Chunk("Priya", "PROPN", "PERSON")
+        mistagged_she = Chunk("She", "NOUN", "")
+        sents = [[priya], [mistagged_she], []]
+        with mock.patch(
+            "ktc.coreference._collect_candidates",
+            side_effect=lambda sent_doc, before_char=None: list(sent_doc),
+        ):
+            chosen = _pick_antecedent(sents, sent_idx=2, pronoun_char=None, pronoun_class="fem")
+        self.assertEqual(chosen, "Priya")
+
     def test_ambiguous_gender_requires_person_antecedent(self):
         knowledge = "The portal and Maria are available. He filed a complaint."
         raw = [Triplet("He", "filed", "a complaint")]
@@ -549,7 +572,9 @@ class TestLiveSummarize(unittest.TestCase):
                 url="https://cybercrime.gov.in/b", title="Cyber", snippet="file FIR", domain="cybercrime.gov.in"
             ),
         ]
-        config = LiveRetrievalConfig(llm_model="gpt-4o-mini", results_per_query=2)
+        config = LiveRetrievalConfig(
+            llm_model="gpt-4o-mini", results_per_query=2, summarize_backend="llm"
+        )
 
         def fake_summarize(query, result, config, client):
             if "ncw" in result.url:
@@ -571,7 +596,9 @@ class TestLiveSummarize(unittest.TestCase):
         results = [
             SearchResult(url="https://who.int/x", title="WHO", snippet="unrelated", domain="who.int"),
         ]
-        config = LiveRetrievalConfig(llm_model="gpt-4o-mini", results_per_query=1)
+        config = LiveRetrievalConfig(
+            llm_model="gpt-4o-mini", results_per_query=1, summarize_backend="llm"
+        )
         fake_openai = mock.MagicMock()
 
         with mock.patch.dict(os.environ, {"LLM_API_KEY": "test-key"}):
@@ -579,6 +606,30 @@ class TestLiveSummarize(unittest.TestCase):
                 with mock.patch("ktc.live_summarize._summarize_one_source", return_value=[]):
                     sentences = summarize_search_results("query", results, config)
         self.assertEqual(sentences, [])
+
+    def test_extractive_summarize_works_without_llm_key(self):
+        snippet = (
+            "Section 376 of the Indian Penal Code prescribes punishment for the offence of rape. "
+            "The offence is cognizable, non-bailable, and triable by the Court of Session."
+        )
+        results = [
+            SearchResult(
+                url="https://indiacode.nic.in/376",
+                title="IPC 376",
+                snippet=snippet,
+                domain="indiacode.nic.in",
+            )
+        ]
+        config = LiveRetrievalConfig(summarize_backend="extractive", results_per_query=1)
+        with mock.patch.dict(os.environ, {"LLM_API_KEY": ""}, clear=False):
+            with mock.patch("ktc.live_summarize.enrich_search_result", side_effect=lambda r, **k: r):
+                sentences = summarize_search_results(
+                    "IPC Section 376 rape India", results, config
+                )
+        self.assertGreaterEqual(len(sentences), 1)
+        self.assertEqual(sentences[0].source_url, "https://indiacode.nic.in/376")
+        self.assertIn("376", sentences[0].sentence)
+        self.assertIn("rape", sentences[0].sentence.lower())
 
 
 class TestLiveKnowledge(unittest.TestCase):

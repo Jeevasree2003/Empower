@@ -144,10 +144,18 @@ def _chunk_compatible(chunk, pronoun_class: str) -> bool:
     return chunk.root.pos_ in {"NOUN", "PROPN"}
 
 
+def _is_pronoun_chunk(chunk) -> bool:
+    """True when a noun-chunk is only a pronoun (including POS mis-tags)."""
+    if getattr(chunk.root, "pos_", None) == "PRON":
+        return True
+    words = re.findall(r"[a-z']+", chunk.text.strip().lower())
+    return bool(words) and all(w in PRONOUNS for w in words)
+
+
 def _collect_candidates(sent_doc, before_char: Optional[int] = None) -> List:
     candidates = []
     for chunk in sent_doc.noun_chunks:
-        if chunk.root.pos_ == "PRON":
+        if _is_pronoun_chunk(chunk):
             continue
         if before_char is not None and chunk.start_char >= before_char:
             continue
@@ -162,12 +170,14 @@ def _pick_from_compatible(compatible: List, pronoun_class: str) -> Optional[str]
         # Prefer nearest preceding PERSON/PROPN; require one for gendered pronouns
         # when multiple candidates exist (reduces wrong substitutions).
         person_chunks = [
-            c for c in reversed(compatible)
-            if c.root.ent_type_ == "PERSON" or c.root.pos_ == "PROPN"
+            c
+            for c in reversed(compatible)
+            if not _is_pronoun_chunk(c)
+            and (c.root.ent_type_ == "PERSON" or c.root.pos_ == "PROPN")
         ]
         if person_chunks:
             return person_chunks[0].text.strip()
-        if len(compatible) == 1:
+        if len(compatible) == 1 and not _is_pronoun_chunk(compatible[0]):
             return compatible[0].text.strip()
         return None
     return compatible[-1].text.strip()
@@ -200,9 +210,11 @@ def _pick_antecedent(
             continue
         if pronoun_class in {"masc", "fem"}:
             for chunk in reversed(compatible):
+                if _is_pronoun_chunk(chunk):
+                    continue
                 if chunk.root.ent_type_ == "PERSON" or chunk.root.pos_ == "PROPN":
                     return chunk.text.strip()
-            if len(compatible) == 1:
+            if len(compatible) == 1 and not _is_pronoun_chunk(compatible[0]):
                 return compatible[0].text.strip()
             continue
         return compatible[-1].text.strip()
