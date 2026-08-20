@@ -9,6 +9,7 @@ clinical safety.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Sequence, Set
 
@@ -63,10 +64,11 @@ _VIOLENCE = frozenset(
         "harassment",
         "abuse",
         "stalking",
+        "torture",
     }
 )
 _PROCEDURE = frozenset(
-    {"fir", "complaint", "helpline", "police", "ncw", "legal aid", "protection order"}
+    {"fir", "complaint", "police", "ncw", "legal aid", "protection order"}
 )
 _FAMILY_LAW = frozenset({"bigamy", "desertion", "dowry", "domestic violence", "kicked"})
 _MISSING = frozenset({"missing person"})
@@ -112,20 +114,7 @@ def _facts() -> List[CounselingFact]:
         CounselingFact(
             DOMAIN_CLINICAL,
             "If you feel unsafe or at immediate risk of harm, contact emergency services 112 in India.",
-            frozenset(
-                {
-                    "dying",
-                    "suicide",
-                    "suicidal",
-                    "self harm",
-                    "self-harm",
-                    "murder",
-                    "kill",
-                    "rape",
-                    "assault",
-                    "threat to life",
-                }
-            ),
+            frozenset({"dying", "suicide", "suicidal", "self harm", "self-harm", "murder", "kill", "assault", "threat to life"}),
             "https://www.mha.gov.in/",
             emergency=True,
         ),
@@ -137,7 +126,7 @@ def _facts() -> List[CounselingFact]:
         CounselingFact(
             DOMAIN_CLINICAL,
             "If someone has threatened violence, move to a safer place if you can and avoid confronting the person who made the threat.",
-            frozenset({"murder", "kill", "rape", "assault", "threat", "threaten", "threat to life"}),
+            frozenset({"murder", "kill", "threat", "threaten", "threat to life"}),
             emergency=True,
         ),
         CounselingFact(
@@ -149,13 +138,23 @@ def _facts() -> List[CounselingFact]:
         CounselingFact(
             DOMAIN_LEGAL,
             "A threat to kill can be reported as criminal intimidation; police protection can be requested without delay.",
-            _VIOLENCE,
+            frozenset({"murder", "kill", "threat", "threaten", "threat to life"}),
         ),
         CounselingFact(
             DOMAIN_LEGAL,
             "Rape is a cognizable offence under IPC Section 376; a survivor can file an FIR and seek medical and legal aid without delay.",
             frozenset({"rape", "gang rape", "gang-rape"}),
             emergency=True,
+        ),
+        CounselingFact(
+            DOMAIN_LEGAL,
+            "Gang rape is an aggravated offence under IPC Section 376D; a delayed FIR is still valid and a survivor can request a medical examination and police protection.",
+            frozenset({"gang rape", "gang-rape", "rape"}),
+        ),
+        CounselingFact(
+            DOMAIN_CLINICAL,
+            "After sexual assault, a survivor can go to the nearest hospital for medical care and forensic examination; treatment should not be refused for want of a police report.",
+            frozenset({"rape", "gang rape", "gang-rape"}),
         ),
         CounselingFact(
             DOMAIN_LEGAL,
@@ -180,7 +179,7 @@ def _facts() -> List[CounselingFact]:
         CounselingFact(
             DOMAIN_LEGAL,
             "Workplace sexual harassment can be reported to the Internal Complaints Committee under the POSH Act; keep copies of messages, calls, and any termination mail.",
-            _WORKPLACE | frozenset({"harassment"}),
+            _WORKPLACE,
         ),
         CounselingFact(
             DOMAIN_LEGAL,
@@ -232,7 +231,8 @@ def _trigger_keys(entities: Sequence[Dict[str, str]], victim_text: str) -> Set[s
         "kicked",
         "harassment",
         "loan",
-        "workplace",
+        "torture",
+        "frustrated",
     ):
         if token in lower:
             keys.add(token)
@@ -248,8 +248,12 @@ def _trigger_keys(entities: Sequence[Dict[str, str]], victim_text: str) -> Set[s
         keys.add("workplace")
     if "loan" in lower or "recovery agent" in lower:
         keys.add("loan")
-    if "invested" in lower or "not refund" in lower:
-        keys.add("scam")
+    if re.search(r"\btortur", lower):
+        keys.add("torture")
+        keys.add("abuse")
+    if re.search(r"raped by\s+\d|gang\s+rape", lower):
+        keys.add("gang rape")
+        keys.add("rape")
     return {k for k in keys if k}
 
 
@@ -268,11 +272,22 @@ def content_need_domains(entities: Sequence[Dict[str, str]], victim_text: str) -
 
 
 def victim_needs_domains(entities: Sequence[Dict[str, str]], victim_text: str) -> Set[str]:
-    """Domains the counselor brief should cover once the victim has spoken."""
+    """Clinical for any victim turn; legal only when the words show a legal need."""
     domains = content_need_domains(entities, victim_text)
     if victim_text.strip():
         domains.add(DOMAIN_CLINICAL)
-        domains.add(DOMAIN_LEGAL)
+        keys = _trigger_keys(entities, victim_text)
+        if keys & (
+            _VIOLENCE
+            | _PROCEDURE
+            | _FAMILY_LAW
+            | _MISSING
+            | _CYBER
+            | _WORKPLACE
+            | _DEBT
+            | _CRISIS
+        ):
+            domains.add(DOMAIN_LEGAL)
     return domains
 
 
@@ -298,6 +313,7 @@ def counseling_candidates(
                 text=fact.text,
                 source="counseling_bank",
                 url=fact.url or None,
+                query="counseling_bank",
                 domain=fact.domain,
             )
         )

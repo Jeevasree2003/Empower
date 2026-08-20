@@ -893,6 +893,8 @@ class TestEntityExtraction(unittest.TestCase):
         self.assertNotIn("treatment for", joined)
         self.assertNotIn("policy", joined)
         self.assertNotIn("suicide prevention", joined)
+        qtexts = [q.text.lower() for q in queries]
+        self.assertFalse(any("online abuse" in t for t in qtexts))
 
     def test_homicide_dialogue_constructs_fir_and_intimidation_queries(self):
         utterance = "Hi Rakshak, my husband is planning to kill me with her secret"
@@ -1213,6 +1215,38 @@ class TestPipelineIntegration(unittest.TestCase):
         qtext = " ".join(q["query"].lower() for q in result["constructed_queries"])
         self.assertIn("kiran", qtext)
         self.assertRegex(qtext, r"whom to contact|where to get mental health help")
+        self.assertNotIn("online abuse", qtext)
+        self.assertNotIn("crpc section 154", joined)
+        bank_queries = {c.get("query") for c in result["ranked_candidates"] if c.get("source") == "counseling_bank"}
+        self.assertIn("counseling_bank", bank_queries)
+
+    def test_torture_turn_is_not_generic_kiran_only(self):
+        from ktc.ranking import CandidateRankingResult
+        from ktc.pipeline import KnowledgeTripletPipeline
+
+        class _LowRanker:
+            model = None
+
+            def rank_candidates_with_scores(self, dialog_history, candidates, top_k=26):
+                cl = list(candidates)
+                scores = [0.21] * len(cl)
+                return CandidateRankingResult(cl[:top_k], scores[:top_k], 0.21)
+
+        pipeline = KnowledgeTripletPipeline(
+            verbalization_backend="template",
+            coref_backend="heuristic",
+            ranker=_LowRanker(),
+        )
+        result = pipeline.inspect(
+            "Yoga reduces stress.",
+            "bot: Hi. user: i am so frustrated . i am being tortured .",
+            enable_live=False,
+        )
+        joined = " ".join(result["reply_knowledge"]).lower()
+        self.assertIn("torture", " ".join(result.get("situations") or []))
+        self.assertRegex(joined, r"498a|domestic violence|abuse|181")
+        qtext = " ".join(q["query"].lower() for q in result["constructed_queries"])
+        self.assertRegex(qtext, r"498a|torture|domestic violence")
 
     def test_full_kare_dialogues_100_500_3000(self):
         if not DATA_PATH.exists():

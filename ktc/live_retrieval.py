@@ -276,6 +276,8 @@ def search_allowlisted(
             url = item.get("url") or item.get("link") or ""
             if not url or not _domain_allowed(url, config.trusted_domains):
                 continue
+            if "/bitstream/" in url.lower() or url.lower().endswith(".pdf"):
+                continue
             domain = urlparse(url).netloc.lower()
             allowlisted.append(
                 SearchResult(

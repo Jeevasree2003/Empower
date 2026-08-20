@@ -84,7 +84,7 @@ def extractive_sentences(query: str, text: str, max_n: int = 3) -> List[str]:
         line = raw.strip()
         if len(line) < 40 or len(line) > 420:
             continue
-        if _is_meta_commentary(line):
+        if _is_broken_live_sentence(line) or _is_meta_commentary(line):
             continue
         if _NON_COUNSELOR_PROSE.search(line):
             continue
@@ -121,6 +121,19 @@ class LiveKnowledgeSentence:
         }
 
 
+def _is_broken_live_sentence(line: str) -> bool:
+    text = line.strip()
+    if text.startswith("--") or "[...]" in text:
+        return True
+    if re.search(r"\bis not rape\b", text, re.I):
+        return True
+    if text.lower().endswith("constituting a") or text.endswith(","):
+        return True
+    if not re.search(r"[.!?]$", text) and len(text) > 120:
+        return True
+    return False
+
+
 def _is_meta_commentary(line: str) -> bool:
     return bool(_META_COMMENTARY_PATTERN.search(line))
 
@@ -147,7 +160,7 @@ def _parse_sentences(raw: str) -> List[str]:
         line_norm = line.upper().replace(" ", "_")
         if line_norm == NO_RELEVANT_INFO or line_norm.startswith(f"{NO_RELEVANT_INFO}_"):
             continue
-        if _is_meta_commentary(line):
+        if _is_meta_commentary(line) or _is_broken_live_sentence(line):
             continue
         if _NON_COUNSELOR_PROSE.search(line):
             continue

@@ -26,7 +26,7 @@ from ktc.live_knowledge import (
     victim_utterances_from_history,
 )
 from ktc.passages import select_dual_domain_passages, split_knowledge_passages
-from ktc.query_builder import SearchQuery, build_queries
+from ktc.query_builder import SearchQuery, build_queries, dialogue_situations
 from ktc.ranking import (
     MAX_RANKED,
     MIN_COSINE,
@@ -35,7 +35,7 @@ from ktc.ranking import (
     rank_candidates,
     ranking_query_from_history,
 )
-from ktc.reply_knowledge import assemble_reply_knowledge
+from ktc.reply_knowledge import assemble_reply_knowledge, is_reply_usable
 from ktc.triplet import Triplet
 from ktc.verbalization import verbalize_triplets
 
@@ -59,6 +59,11 @@ class HybridRunResult:
     counseling_bank_used: int = 0
     filtered_triplets: List[Triplet] = field(default_factory=list)
     constructed_queries: List[SearchQuery] = field(default_factory=list)
+    entities: List[Dict[str, str]] = field(default_factory=list)
+    situations: List[str] = field(default_factory=list)
+    static_verbalized: List[str] = field(default_factory=list)
+    live_verbalized: List[str] = field(default_factory=list)
+    victim_span: str = ""
 
 
 @dataclass
@@ -198,7 +203,8 @@ class KnowledgeTripletPipeline:
         nlp = self._get_nlp()
         query = ranking_query_from_history(dialog_history, nlp=nlp)
         victim_span = " ".join(victim_utterances_from_history(dialog_history)[-2:])
-        entities = extract_entities(query or victim_span, nlp=nlp)
+        entities = extract_entities(victim_span, nlp=nlp)
+        situations = dialogue_situations(victim_span)
         passages = split_knowledge_passages(knowledge_text)
         search_domains = content_need_domains(entities, victim_span)
         selected_passages = select_dual_domain_passages(
@@ -255,9 +261,23 @@ class KnowledgeTripletPipeline:
             min_cosine=self.min_cosine,
         )
         bank = counseling_candidates(entities, victim_span)
-        ranked = merge_turn_knowledge(ranked, bank, top_k=max(self.top_k, 8))
-        ranked = assemble_reply_knowledge(ranked, top_k=self.top_k)
+        ranked = merge_turn_knowledge(ranked, bank, top_k=max(self.top_k, 10))
+        ranked = assemble_reply_knowledge(ranked, top_k=max(self.top_k, 10))
         verbalized = self._verbalize_candidates(ranked)
+        static_verbalized = []
+        if filtered:
+            for sentence in verbalize_triplets(
+                filtered[:12],
+                backend="template",
+                model=self.live_config.llm_model,
+                llm_config=self.live_config,
+            ):
+                probe = KnowledgeCandidate(text=sentence, source="static_dataset")
+                if is_reply_usable(probe):
+                    static_verbalized.append(sentence)
+        live_verbalized = [
+            c.text for c in ranked if c.source == "live_api"
+        ]
         return HybridRunResult(
             verbalized=verbalized,
             top1_similarity_score=top1_score,
@@ -269,6 +289,11 @@ class KnowledgeTripletPipeline:
             counseling_bank_used=sum(1 for c in ranked if c.source == "counseling_bank"),
             filtered_triplets=filtered,
             constructed_queries=constructed,
+            entities=entities,
+            situations=situations,
+            static_verbalized=static_verbalized,
+            live_verbalized=live_verbalized,
+            victim_span=victim_span,
         )
 
     def run_raw_knowledge(self, knowledge_text: str) -> List[str]:
@@ -282,18 +307,45 @@ class KnowledgeTripletPipeline:
             enable_live=enable_live,
         )
         used_text = " ".join(hybrid.passages_used)
+        module_knowledge = []
+        seen = set()
+        for sentence in hybrid.verbalized + hybrid.live_verbalized + hybrid.static_verbalized:
+            key = sentence.strip().lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            module_knowledge.append(sentence.strip())
         return {
+            "query_field_note": (
+                "ranked_candidates[].query is the live Tavily search string. "
+                "counseling_bank items use query='counseling_bank' because they are local facts, not search hits. "
+                "See constructed_queries for searches that run with --enable-live."
+            ),
+            "victim_span": hybrid.victim_span,
+            "entities": hybrid.entities,
+            "situations": hybrid.situations,
             "ranking_query": hybrid.ranking_query,
             "constructed_queries": [q.to_dict() for q in hybrid.constructed_queries],
+            "static_knowledge": {
+                "passages_used": hybrid.passages_used,
+                "no_passages_used": hybrid.no_passages_used,
+                "filtered_triplets": [t.to_dict() for t in hybrid.filtered_triplets[:20]],
+                "verbalized": hybrid.static_verbalized,
+            },
+            "live_knowledge": {
+                "enabled": hybrid.live_enabled,
+                "verbalized": hybrid.live_verbalized,
+            },
+            "counseling_bank_used": hybrid.counseling_bank_used,
             "reply_knowledge": hybrid.verbalized,
             "verbalized": hybrid.verbalized,
+            "module_knowledge": module_knowledge,
             "ranked_candidates": [c.to_dict() for c in hybrid.ranked_candidates],
-            "counseling_bank_used": hybrid.counseling_bank_used,
-            "live_retrieval_enabled": hybrid.live_enabled,
             "top1_similarity_score": hybrid.top1_similarity_score,
-            "no_passages_used": hybrid.no_passages_used,
             "passages_used_count": len(hybrid.passages_used),
             "passages_used_preview": [text[:180] for text in hybrid.passages_used],
             "filtered_triplet_count": len(hybrid.filtered_triplets),
             "cleaned_knowledge_preview": used_text[:240],
+            "no_passages_used": hybrid.no_passages_used,
+            "live_retrieval_enabled": hybrid.live_enabled,
         }

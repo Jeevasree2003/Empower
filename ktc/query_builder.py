@@ -12,6 +12,7 @@ from ktc.entity_extraction import (
     CATEGORY_LEGAL,
     CATEGORY_MEDIUM,
     CATEGORY_MENTAL_HEALTH,
+    _MEDIUM_TERMS,
 )
 
 logger = logging.getLogger(__name__)
@@ -192,8 +193,12 @@ def dialogue_situations(victim_text: str) -> List[str]:
         add("homicide_threat")
     elif re.search(r"\b(murder|homicide)\b", text) and "romance" not in text:
         add("homicide_threat")
-    if re.search(r"\brape\b|gang[\s-]?rape", text):
+    if re.search(r"\brape\b|gang[\s-]?rape|raped by", text):
         add("rape")
+    if re.search(r"raped by\s+\d|gang[\s-]?rape|6\s+\w+\s+men", text):
+        add("gang_rape")
+    if re.search(r"\btortur", text):
+        add("torture")
     if re.search(r"kicked me|out of the house|thrown out|shared household", text):
         add("kicked_out")
     if re.search(r"\b(posh|workplace|employer|terminate(?:d)? me)\b", text) or (
@@ -296,6 +301,24 @@ def _situation_queries(victim_text: str) -> List[SearchQuery]:
                         "crime_statute_indiacode",
                     ),
                 ]
+            )
+        elif name == "gang_rape":
+            queries.append(
+                _sq(
+                    f"IPC Section 376D gang rape delayed FIR medical examination India indiacode {year}",
+                    "gang rape",
+                    CATEGORY_CRIME,
+                    "sit_rape_report",
+                )
+            )
+        elif name == "torture":
+            queries.append(
+                _sq(
+                    f"cruelty torture IPC 498A Protection of Women from Domestic Violence Act helpline 181 India {year}",
+                    "torture",
+                    CATEGORY_CRIME,
+                    "sit_pwdva",
+                )
             )
         elif name == "kicked_out":
             queries.append(
@@ -516,7 +539,12 @@ def _legal_queries(entity: str) -> List[SearchQuery]:
     ]
 
 
+_MEDIUM_LEXICON = {t.lower() for t in _MEDIUM_TERMS}
 _GENERIC_MEDIUMS = frozenset({"online", "phone", "sms", "email", "social media"})
+
+
+def _normalize_medium(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip().lower())
 
 
 def _medium_is_redundant(medium: str, crime: str) -> bool:
@@ -605,6 +633,8 @@ def build_queries(
         elif category == CATEGORY_LEGAL:
             built.extend(_legal_queries(text))
         elif category == CATEGORY_MEDIUM:
+            if _normalize_medium(raw_text) not in _MEDIUM_LEXICON:
+                continue
             built.extend(_medium_queries(text, crime_hint=crime_context))
 
     seen = set()

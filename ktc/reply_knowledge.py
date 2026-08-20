@@ -46,10 +46,12 @@ def is_reply_usable(candidate: KnowledgeCandidate) -> bool:
     if candidate.source == "counseling_bank":
         return True
     if candidate.source == "static_dataset":
-        return False
+        return bool(_GROUNDED_FACT.search(text) or _PHONE.search(text)) and not _ANECDOTE.search(text)
     if _ANECDOTE.search(text):
         return False
     if candidate.source == "live_api":
+        if re.search(r"\[\.+\.\.\]|is not rape|^--", text, re.I):
+            return False
         return bool(_GROUNDED_FACT.search(text) or _PHONE.search(text))
     return bool(_GROUNDED_FACT.search(text) or _PHONE.search(text))
 

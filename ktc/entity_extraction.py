@@ -46,6 +46,8 @@ _CRIME_TERMS = (
     "desertion",
     "bigamy",
     "missing person",
+    "torture",
+    "tortured",
 )
 
 _MENTAL_HEALTH_TERMS = (
@@ -129,12 +131,19 @@ def _find_lexicon_matches(text: str, terms: tuple[str, ...]) -> List[str]:
 def _entities_from_spacy(text: str, nlp) -> List[Dict[str, str]]:
     doc = nlp(text)
     entities: List[Dict[str, str]] = []
+    skip_bits = ("mental", "insane", "helpline", "kiran", "icall", "health")
     for ent in doc.ents:
-        if ent.label_ in {"ORG", "LAW", "GPE", "PRODUCT"}:
-            category = CATEGORY_LEGAL if ent.label_ == "LAW" else CATEGORY_MEDIUM
-            if ent.label_ == "ORG" and "police" in ent.text.lower():
-                category = CATEGORY_LEGAL
-            entities.append({"text": ent.text.strip(), "category": category})
+        span = ent.text.strip()
+        if any(bit in span.lower() for bit in skip_bits):
+            continue
+        if ent.label_ == "LAW":
+            entities.append({"text": span, "category": CATEGORY_LEGAL})
+        elif ent.label_ == "ORG" and "police" in span.lower():
+            entities.append({"text": span, "category": CATEGORY_LEGAL})
+        elif ent.label_ in {"ORG", "GPE"} and len(span.split()) <= 4:
+            continue
+        elif ent.label_ == "PRODUCT":
+            continue
     return entities
 
 
@@ -205,6 +214,13 @@ def extract_entities(victim_utterance: str, nlp=None) -> List[Dict[str, str]]:
 
     if re.search(r"where to go|whom to ask|who to ask|going insane", lower):
         add("mental health", CATEGORY_MENTAL_HEALTH)
+
+    if re.search(r"\btortur", lower):
+        add("torture", CATEGORY_CRIME)
+        add("abuse", CATEGORY_CRIME)
+
+    if re.search(r"raped by\s+\d|gang\s+rape|6\s+\w+\s+men", lower):
+        add("gang rape", CATEGORY_CRIME)
 
     for match in _SECTION_RE.finditer(victim_utterance):
         add(f"section {match.group(1)}", CATEGORY_LEGAL)
