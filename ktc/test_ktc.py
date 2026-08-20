@@ -2,6 +2,7 @@
 
 import json
 import os
+import sys
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -24,7 +25,7 @@ from ktc.live_knowledge import fetch_live_knowledge, static_candidates_from_trip
 from ktc.live_retrieval import SearchResult, _domain_allowed
 from ktc.live_summarize import summarize_search_results
 from ktc.query_builder import build_queries
-from ktc.ranking import _stable_rank_order
+from ktc.ranking import _stable_rank_order, apply_score_gate, ranking_query_from_history
 from ktc.triplet import Triplet
 from ktc.verbalization import verbalize_llm, verbalize_template, verbalize_triplets, _sanitize_llm_sentence
 
@@ -34,6 +35,7 @@ if _DATA_ENV:
     DATA_PATH = Path(_DATA_ENV)
 else:
     DATA_PATH = Path(__file__).resolve().parents[2].parent / "KARE-data" / "KARE" / "Data" / "KARE.jsonl"
+SAMPLE_PATH = Path(__file__).resolve().parents[1] / "dataset" / "KARE-Sample.json"
 
 BAD_COREF_HEADS = frozenset({"all the tasks", "millennials", "the matter"})
 
@@ -91,11 +93,12 @@ class TestExtraction(unittest.TestCase):
         self.assertTrue(any("police" in h for h in heads))
 
     def test_real_kare_sentence_patterns(self):
-        if not DATA_PATH.exists():
+        path = DATA_PATH if DATA_PATH.exists() else SAMPLE_PATH
+        if not path.exists():
             self.skipTest("KARE.jsonl not available (set KARE_JSONL_PATH)")
 
         samples = []
-        with DATA_PATH.open(encoding="utf-8") as f:
+        with path.open(encoding="utf-8") as f:
             for line in f:
                 record = json.loads(line)
                 knowledge = record.get("knowledge", "")
@@ -126,6 +129,13 @@ class TestExtraction(unittest.TestCase):
         self.assertGreaterEqual(len(triplets), 2)
         self.assertTrue(any("investigat" in r for r in relations))
         self.assertTrue(any("prosecut" in r for r in relations))
+
+    def test_non_locative_infinitive_not_a_prep_triple(self):
+        triplets = self._extract("The officer arranged to face the accused in court.")
+        self.assertFalse(
+            any(" to" in f" {t.relation.lower()} " or t.relation.lower().endswith(" to") for t in triplets),
+            msg=f"unexpected to-prep triples: {[(t.relation, t.tail) for t in triplets]}",
+        )
 
     def test_direct_object_not_replaced_by_pobj(self):
         triplets = self._extract("Victims can lodge a complaint at the police station.")
@@ -190,6 +200,16 @@ class TestFiltering(unittest.TestCase):
         triplet = Triplet("police station", "to the", "complaint desk")
         self.assertFalse(passes_filters(triplet))
 
+    def test_rejects_weak_copula_prep_relation(self):
+        self.assertFalse(passes_filters(Triplet("victim", "is to", "file a complaint")))
+        self.assertFalse(passes_filters(Triplet("portal", "was of", "the government")))
+
+    def test_rejects_repeated_tokens(self):
+        self.assertFalse(passes_filters(Triplet("People", "Do", "Yoga Yoga")))
+
+    def test_rejects_near_duplicate_head_tail(self):
+        self.assertFalse(passes_filters(Triplet("the police station", "helps", "police station")))
+
 
 class TestVerbalization(unittest.TestCase):
     def test_template_adds_punctuation(self):
@@ -238,8 +258,10 @@ class TestVerbalization(unittest.TestCase):
         mock_client.chat.completions.create.return_value = mock_response
         mock_make_client.return_value = (mock_client, LiveRetrievalConfig(llm_model="test-model"))
 
+        fake_openai = mock.Mock()
         with mock.patch.dict(os.environ, {"LLM_API_KEY": "test-key"}):
-            sentences = verbalize_llm([Triplet("victim", "can file", "an online complaint")])
+            with mock.patch.dict(sys.modules, {"openai": fake_openai}):
+                sentences = verbalize_llm([Triplet("victim", "can file", "an online complaint")])
 
         self.assertEqual(sentences, ["A victim can file an online complaint."])
         mock_client.chat.completions.create.assert_called_once()
@@ -300,6 +322,33 @@ class TestCoreference(unittest.TestCase):
             chosen = _pick_antecedent(sents, sent_idx=2, pronoun_char=None, pronoun_class="fem")
         self.assertEqual(chosen, "Priya")
 
+    def test_single_candidate_fallback_skips_neuter_pronoun(self):
+        from ktc.coreference import _pick_antecedent
+
+        class Root:
+            def __init__(self, pos_, ent_type_=""):
+                self.pos_ = pos_
+                self.ent_type_ = ent_type_
+                self.morph = type("Morph", (), {"get": lambda self, key: []})()
+
+        class Chunk:
+            def __init__(self, text, pos_, ent_type_=""):
+                self.text = text
+                self.root = Root(pos_, ent_type_)
+
+            def __iter__(self):
+                return iter(())
+
+        portal = Chunk("the Cyber Cell", "NOUN")
+        mistagged_it = Chunk("It", "NOUN")
+        sents = [[portal], [mistagged_it], []]
+        with mock.patch(
+            "ktc.coreference._collect_candidates",
+            side_effect=lambda sent_doc, before_char=None: list(sent_doc),
+        ):
+            chosen = _pick_antecedent(sents, sent_idx=2, pronoun_char=None, pronoun_class="neuter")
+        self.assertEqual(chosen, "the Cyber Cell")
+
     def test_ambiguous_gender_requires_person_antecedent(self):
         knowledge = "The portal and Maria are available. He filed a complaint."
         raw = [Triplet("He", "filed", "a complaint")]
@@ -316,21 +365,23 @@ class TestCoreference(unittest.TestCase):
         self.assertEqual(resolved[0].head, "It")
 
     def test_no_document_global_fallback_on_real_dialogues(self):
-        if not DATA_PATH.exists():
-            self.skipTest("KARE.jsonl not available (set KARE_JSONL_PATH)")
+        path = DATA_PATH if DATA_PATH.exists() else SAMPLE_PATH
+        if not path.exists():
+            self.skipTest("KARE.jsonl / KARE-Sample.json not available")
 
         from ktc.cleaning import clean_knowledge_text
 
         for did in ("100", "3000", "4500"):
             with self.subTest(dialogue_id=did):
                 dialogue = None
-                with DATA_PATH.open(encoding="utf-8") as f:
+                with path.open(encoding="utf-8") as f:
                     for line in f:
                         record = json.loads(line)
                         if str(record["dialogue_id"]) == did:
                             dialogue = record
                             break
-                self.assertIsNotNone(dialogue)
+                if dialogue is None:
+                    self.skipTest(f"dialogue {did} not in {path}")
                 cleaned = clean_knowledge_text(dialogue["knowledge"])
                 raw = extract_triplets(cleaned, nlp=self.nlp)
                 resolved = resolve_coreferences(raw, cleaned, nlp=self.nlp)
@@ -352,6 +403,32 @@ class TestRanking(unittest.TestCase):
     def test_stable_rank_order_empty(self):
         order = _stable_rank_order(np.array([]), top_k=5)
         self.assertEqual(len(order), 0)
+
+    def test_score_gate_drops_weak_matches(self):
+        pool = [
+            KnowledgeCandidate(text="relevant FIR procedure", source="static_dataset"),
+            KnowledgeCandidate(text="unrelated yoga tip", source="static_dataset"),
+        ]
+        kept, scores, top1 = apply_score_gate(pool, [0.51, 0.21], min_cosine=0.38, top_k=5)
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(kept[0].text, "relevant FIR procedure")
+        self.assertAlmostEqual(top1, 0.51)
+        self.assertEqual(scores, [0.51])
+
+    def test_score_gate_empty_when_none_pass(self):
+        pool = [KnowledgeCandidate(text="noise", source="static_dataset")]
+        kept, scores, top1 = apply_score_gate(pool, [0.22], min_cosine=0.38, top_k=5)
+        self.assertEqual(kept, [])
+        self.assertEqual(scores, [])
+        self.assertAlmostEqual(top1, 0.22)
+
+    def test_ranking_query_ignores_bot_greeting(self):
+        history = "agent: Greetings from Rakshak. user: my husband threatened to murder me."
+        with mock.patch("ktc.entity_extraction.extract_entities", return_value=[{"text": "murder", "category": "crime"}]):
+            query = ranking_query_from_history(history)
+        self.assertNotIn("Rakshak", query)
+        self.assertIn("murder", query.lower())
+        self.assertIn("husband", query.lower())
 
     def test_mixed_pool_ranking_no_length_bias(self):
         """Static and live candidates with equal relevance should both appear in top-k."""
@@ -787,6 +864,23 @@ class TestNltkSetup(unittest.TestCase):
 
 
 class TestPipelineIntegration(unittest.TestCase):
+    def _passthrough_ranker(self):
+        from ktc.ranking import CandidateRankingResult
+
+        class _Ranker:
+            model = None
+
+            def rank_candidates_with_scores(self, dialog_history, candidates, top_k=26):
+                cl = list(candidates)
+                scores = [0.9] * len(cl)
+                sliced = cl[:top_k]
+                scored = scores[:top_k]
+                return CandidateRankingResult(
+                    sliced, scored, scored[0] if scored else 0.0
+                )
+
+        return _Ranker()
+
     def test_config_defaults_live_retrieval_off(self):
         config = LiveRetrievalConfig.load()
         self.assertFalse(config.enable_live_retrieval)
@@ -800,6 +894,8 @@ class TestPipelineIntegration(unittest.TestCase):
             pipeline = KnowledgeTripletPipeline(
                 verbalization_backend="template",
                 coref_backend="heuristic",
+                ranker=self._passthrough_ranker(),
+                min_cosine=0.0,
             )
             sentences = pipeline.run(knowledge, history, enable_live=False)
         fetch.assert_not_called()
@@ -814,6 +910,8 @@ class TestPipelineIntegration(unittest.TestCase):
             pipeline = KnowledgeTripletPipeline(
                 verbalization_backend="template",
                 coref_backend="heuristic",
+                ranker=self._passthrough_ranker(),
+                min_cosine=0.0,
             )
             pipeline.run(
                 "Victims can file a complaint online.",
@@ -830,6 +928,8 @@ class TestPipelineIntegration(unittest.TestCase):
             pipeline = KnowledgeTripletPipeline(
                 verbalization_backend="template",
                 coref_backend="heuristic",
+                ranker=self._passthrough_ranker(),
+                min_cosine=0.0,
             )
             pipeline.run(
                 "Victims can file a complaint.",
@@ -839,6 +939,92 @@ class TestPipelineIntegration(unittest.TestCase):
         fetch.assert_called_once()
         victim_arg = fetch.call_args[0][0]
         self.assertIn("raped", victim_arg.lower())
+        self.assertTrue(fetch.call_args.kwargs.get("enabled", True))
+
+    def test_greeting_without_victim_yields_no_static_knowledge(self):
+        from ktc.pipeline import KnowledgeTripletPipeline
+
+        pipeline = KnowledgeTripletPipeline(
+            verbalization_backend="template",
+            coref_backend="heuristic",
+            ranker=self._passthrough_ranker(),
+        )
+        result = pipeline.run_hybrid(
+            "Do yoga daily for stress relief. Kinjal Singh was arrested in a romance scam.",
+            "agent: Greetings, this is Rakshak to help you.",
+            enable_live=False,
+        )
+        self.assertEqual(result.verbalized, [])
+        self.assertTrue(result.no_passages_used)
+
+    def test_off_topic_blob_yields_no_static_when_gate_fails(self):
+        from ktc.ranking import CandidateRankingResult
+        from ktc.pipeline import KnowledgeTripletPipeline
+
+        class _LowRanker:
+            model = None
+
+            def rank_candidates_with_scores(self, dialog_history, candidates, top_k=26):
+                cl = list(candidates)
+                scores = [0.21] * len(cl)
+                return CandidateRankingResult(cl[:top_k], scores[:top_k], 0.21)
+
+        pipeline = KnowledgeTripletPipeline(
+            verbalization_backend="template",
+            coref_backend="heuristic",
+            ranker=_LowRanker(),
+            min_cosine=0.38,
+        )
+        result = pipeline.run_hybrid(
+            "Romance scams often involve fake dating profiles and requests for money.",
+            "user: my husband said he will murder me tonight.",
+            enable_live=False,
+        )
+        self.assertEqual(result.verbalized, [])
+
+    def test_sample_dialogues_100_and_500_do_not_crash(self):
+        if not SAMPLE_PATH.exists():
+            self.skipTest("dataset/KARE-Sample.json not available")
+        from ktc.pipeline import KnowledgeTripletPipeline
+
+        pipeline = KnowledgeTripletPipeline(
+            verbalization_backend="template",
+            coref_backend="heuristic",
+            ranker=self._passthrough_ranker(),
+            min_cosine=0.38,
+        )
+        wanted = {"100": 0, "500": 0}
+        found = {}
+        with SAMPLE_PATH.open(encoding="utf-8") as f:
+            for line in f:
+                record = json.loads(line)
+                did = str(record["dialogue_id"])
+                if did in wanted and did not in found:
+                    found[did] = record
+                if len(found) == len(wanted):
+                    break
+        self.assertEqual(set(found), set(wanted))
+        for did, record in found.items():
+            with self.subTest(dialogue_id=did):
+                utterances = sorted(record["utterances"], key=lambda u: int(u["utterance_no"]))
+                history = []
+                target = None
+                bot_turn = 0
+                for utterance in utterances:
+                    role = utterance["author_role"]
+                    text = f"{role}: {utterance['utterance'].strip()}"
+                    if role in {"bot", "agent"} and history:
+                        if bot_turn == wanted[did]:
+                            target = " ".join(history)
+                            break
+                        bot_turn += 1
+                    history.append(text)
+                self.assertIsNotNone(target)
+                result = pipeline.inspect(record["knowledge"], target, enable_live=False)
+                self.assertIn("verbalized", result)
+                self.assertIn("no_passages_used", result)
+                joined = " ".join(result["verbalized"]).lower()
+                self.assertNotIn("kinjal singh", joined)
 
 
 if __name__ == "__main__":

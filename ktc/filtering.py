@@ -39,6 +39,26 @@ _UNRESOLVED_PRONOUN_TAILS = frozenset(
     {"it", "this", "that", "these", "those", "he", "she", "him", "her", "them", "they", "we", "us"}
 )
 
+# Weak copula+prep relations that are almost never informative.
+_WEAK_RELATIONS = re.compile(r"^(?:is|was|are|were)\s+(?:to|of)$", re.IGNORECASE)
+
+_DATE_RE = re.compile(
+    r"\b(?:\d{1,2}\s+)?(?:january|february|march|april|may|june|july|august|"
+    r"september|october|november|december)\s+\d{1,2},?\s+\d{4}\b"
+    r"|\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b"
+    r"|\b(?:19|20)\d{2}\b",
+    re.IGNORECASE,
+)
+
+_BOILERPLATE_FRAGMENTS = (
+    "logged in to post a comment",
+    "will be in touch with you shortly",
+    "the legal team of online legal india",
+)
+
+_MAX_TAIL_WORDS = 12
+_MAX_HEAD_WORDS = 10
+
 # Relation tokens that are not verbs on their own (stopword-only relations).
 _RELATION_STOPWORDS = frozenset(
     {"a", "an", "the", "to", "of", "in", "on", "at", "for", "with", "by", "from", "as"}
@@ -90,6 +110,34 @@ def _relation_is_stopword_only(relation: str) -> bool:
     return bool(words) and all(w in _RELATION_STOPWORDS for w in words)
 
 
+def _has_repeated_token(text: str) -> bool:
+    words = [w for w in re.findall(r"[A-Za-z]+", text) if len(w) > 2]
+    return any(a.lower() == b.lower() for a, b in zip(words, words[1:]))
+
+
+def _token_jaccard(a: str, b: str) -> float:
+    sa = set(re.findall(r"[a-z']+", a.lower()))
+    sb = set(re.findall(r"[a-z']+", b.lower()))
+    if not sa or not sb:
+        return 0.0
+    return len(sa & sb) / len(sa | sb)
+
+
+def _contains_boilerplate(text: str) -> bool:
+    lowered = text.lower()
+    return any(frag in lowered for frag in _BOILERPLATE_FRAGMENTS)
+
+
+def _near_duplicate_head_tail(head: str, tail: str) -> bool:
+    if _token_jaccard(head, tail) >= 0.8:
+        return True
+    h = set(re.findall(r"[a-z']+", head.lower()))
+    t = set(re.findall(r"[a-z']+", tail.lower()))
+    if h and t and (h <= t or t <= h) and min(len(h), len(t)) >= 2:
+        return True
+    return False
+
+
 def passes_filters(triplet: Triplet) -> bool:
     if triplet.tail.strip().lower() == triplet.head.strip().lower():
         return False
@@ -108,6 +156,18 @@ def passes_filters(triplet: Triplet) -> bool:
     if _is_unresolved_pronoun_tail(triplet.tail):
         return False
     if _relation_is_stopword_only(triplet.relation):
+        return False
+    if _WEAK_RELATIONS.match(triplet.relation.strip()):
+        return False
+    if _has_repeated_token(triplet.as_text()):
+        return False
+    if _contains_boilerplate(triplet.as_text()):
+        return False
+    if len(triplet.tail.split()) > _MAX_TAIL_WORDS or len(triplet.head.split()) > _MAX_HEAD_WORDS:
+        return False
+    if _DATE_RE.search(triplet.tail) and len(triplet.tail.split()) <= 4:
+        return False
+    if _near_duplicate_head_tail(triplet.head, triplet.tail):
         return False
     return True
 

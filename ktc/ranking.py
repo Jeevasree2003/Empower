@@ -10,6 +10,9 @@ import numpy as np
 from ktc.knowledge_item import KnowledgeCandidate
 from ktc.triplet import Triplet
 
+MIN_COSINE = 0.38
+MAX_RANKED = 5
+
 
 @dataclass
 class CandidateRankingResult:
@@ -44,6 +47,50 @@ def _stable_rank_order(scores: np.ndarray, top_k: int) -> np.ndarray:
     indices = np.arange(n)
     # lexsort: last key is primary — sort by score desc, then index asc for ties.
     return np.lexsort((indices, -scores))[:top_k]
+
+
+def ranking_query_from_history(dialog_history: str, nlp=None) -> str:
+    """Build the ranking text from the last 1–2 victim/user utterances.
+
+    Bot/agent greetings are excluded. The latest victim turn is repeated so it
+    outweighs the previous one. Extracted entities are appended as extra tokens.
+    """
+    from ktc.entity_extraction import extract_entities
+    from ktc.live_knowledge import victim_utterances_from_history
+
+    utterances = victim_utterances_from_history(dialog_history)
+    if not utterances:
+        return ""
+    recent = utterances[-2:]
+    if len(recent) == 1:
+        text = recent[0]
+    else:
+        text = f"{recent[0]} {recent[1]} {recent[1]}"
+    entities = extract_entities(recent[-1], nlp=nlp)
+    extra = " ".join(entity["text"] for entity in entities)
+    return f"{text} {extra}".strip()
+
+
+def apply_score_gate(
+    candidates: List[KnowledgeCandidate],
+    scores: List[float],
+    *,
+    min_cosine: float = MIN_COSINE,
+    top_k: int = MAX_RANKED,
+) -> Tuple[List[KnowledgeCandidate], List[float], float]:
+    """Keep candidates with cosine >= *min_cosine*, at most *top_k*."""
+    top1 = scores[0] if scores else 0.0
+    kept_c: List[KnowledgeCandidate] = []
+    kept_s: List[float] = []
+    for candidate, score in zip(candidates, scores):
+        if score < min_cosine:
+            continue
+        kept_c.append(candidate)
+        kept_s.append(score)
+        if len(kept_c) >= top_k:
+            break
+    return kept_c, kept_s, top1
+
 
 
 class SentenceBertRanker:
@@ -154,10 +201,17 @@ def rank_triplets(
 def rank_candidates(
     dialog_history: str,
     candidates: Iterable[KnowledgeCandidate],
-    top_k: int = 26,
+    top_k: int = MAX_RANKED,
     ranker: Optional[CandidateRanker] = None,
+    min_cosine: float = MIN_COSINE,
 ) -> Tuple[List[KnowledgeCandidate], float]:
     if ranker is None:
         ranker = SentenceBertRanker()
-    result = ranker.rank_candidates_with_scores(dialog_history, candidates, top_k=top_k)
-    return result.candidates, result.top1_score
+    candidate_list = list(candidates)
+    result = ranker.rank_candidates_with_scores(
+        dialog_history, candidate_list, top_k=max(len(candidate_list), 1)
+    )
+    kept, _scores, top1 = apply_score_gate(
+        result.candidates, result.scores, min_cosine=min_cosine, top_k=top_k
+    )
+    return kept, top1

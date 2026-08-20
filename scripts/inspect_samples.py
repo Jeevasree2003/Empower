@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 """Inspect static KTC output on a few KARE knowledge passages (live retrieval off).
 
-For hybrid static+live fetching, use scripts/inspect_ktc.py (enable_live defaults to on).
+For hybrid static+live fetching, use scripts/inspect_ktc.py or
+scripts/run_ktc_stages.py with --enable-live (off by default).
 """
 
 from __future__ import annotations

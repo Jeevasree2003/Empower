@@ -68,8 +68,10 @@ def main():
 
         dialogue = load_dialogue(args.input, did)
         turn_idx, victim_text, agent_response, history = get_turn_context(dialogue, bot_turn)
-        filtered = pipeline.get_filtered_triplets(dialogue.get("knowledge", "") or "")
-        verbalized = pipeline.run(dialogue.get("knowledge", "") or "", history, filtered=filtered)
+        filtered = pipeline.get_filtered_triplets(dialogue.get("knowledge", "") or "", history)
+        verbalized = pipeline.run(
+            dialogue.get("knowledge", "") or "", history, filtered=filtered, enable_live=False
+        )
 
         print(divider)
         print(f"DIALOGUE {did}  |  BOT TURN {turn_idx}")

@@ -5,7 +5,7 @@ rouge_score
 sacrebleu
 nltk
 spacy==3.8.14
-en-core-web-sm==3.8.0
+en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
 sentence-transformers
 numpy
 pyyaml
@@ -17,4 +17,5 @@ openai
 
 # After install:
 # python scripts/setup_nltk.py
-# en-core-web-sm is pinned above (compatible with spacy==3.8.14); no extra download step.
+# Keep spaCy pins in lockstep: en-core-web-sm==3.8.0 is the model for spacy==3.8.14.
+# Unpinned spaCy versions can retag finite verbs as nouns and silently drop OpenIE triples.

@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
 from ktc.pipeline import KnowledgeTripletPipeline
-from ktc.triplet import Triplet
 
 KNOWLEDGE_SEP = "__knowledge__"
 NO_PASSAGE_USED = "no_passages_used"
@@ -74,7 +73,6 @@ def build_turn_examples(
     knowledge_text = dialogue.get("knowledge", "") or ""
     examples: List[dict] = []
     history: List[str] = []
-    filtered_triplets: Optional[List[Triplet]] = None
 
     for utterance in utterances:
         formatted = format_utterance(utterance)
@@ -85,12 +83,9 @@ def build_turn_examples(
             if knowledge_mode == "raw":
                 verbalized = pipeline.run_raw_knowledge(knowledge_text)
             else:
-                if filtered_triplets is None:
-                    filtered_triplets = pipeline.get_filtered_triplets(knowledge_text)
                 verbalized = pipeline.run(
                     knowledge_text,
                     dialog_history,
-                    filtered=filtered_triplets,
                     enable_live=enable_live,
                 )
 
@@ -134,8 +129,8 @@ def preprocess(
     seed: int = 42,
     knowledge_mode: str = "ktc",
     verbalization_backend: str = "llm",
-    coref_backend: str = "model",
-    top_k: int = 26,
+    coref_backend: str = "heuristic",
+    top_k: int = 5,
     max_dialogues: Optional[int] = None,
     enable_live: bool = False,
 ) -> Dict[str, int]:
@@ -196,10 +191,10 @@ def main():
     parser.add_argument(
         "--coref_backend",
         choices=["heuristic", "model"],
-        default="model",
+        default="heuristic",
         help="Coreference backend for Stage 2c (heuristic=local rules, model=coreferee).",
     )
-    parser.add_argument("--top_k", type=int, default=26)
+    parser.add_argument("--top_k", type=int, default=5)
     parser.add_argument(
         "--max_dialogues",
         type=int,
