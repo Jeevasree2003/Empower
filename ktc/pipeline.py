@@ -23,10 +23,10 @@ from ktc.live_config import ApiCallBudget, LiveRetrievalConfig
 from ktc.live_knowledge import (
     fetch_live_knowledge,
     static_candidates_from_triplets,
-    victim_utterance_from_history,
     victim_utterances_from_history,
 )
 from ktc.passages import select_dual_domain_passages, split_knowledge_passages
+from ktc.query_builder import SearchQuery, build_queries
 from ktc.ranking import (
     MAX_RANKED,
     MIN_COSINE,
@@ -58,6 +58,7 @@ class HybridRunResult:
     no_passages_used: bool = False
     counseling_bank_used: int = 0
     filtered_triplets: List[Triplet] = field(default_factory=list)
+    constructed_queries: List[SearchQuery] = field(default_factory=list)
 
 
 @dataclass
@@ -196,7 +197,6 @@ class KnowledgeTripletPipeline:
     ) -> HybridRunResult:
         nlp = self._get_nlp()
         query = ranking_query_from_history(dialog_history, nlp=nlp)
-        victim_text = victim_utterance_from_history(dialog_history)
         victim_span = " ".join(victim_utterances_from_history(dialog_history)[-2:])
         entities = extract_entities(query or victim_span, nlp=nlp)
         passages = split_knowledge_passages(knowledge_text)
@@ -228,12 +228,17 @@ class KnowledgeTripletPipeline:
         if query and _VIOLENCE_HINT.search(query):
             filtered = [t for t in filtered if not _SCAM_NOISE.search(t.as_text())]
 
+        constructed = build_queries(
+            entities,
+            max_queries=self.live_config.max_live_queries_per_dialogue,
+            victim_text=victim_span,
+        )
         pool = static_candidates_from_triplets(filtered)
         live_on = self.live_config.enable_live_retrieval if enable_live is None else enable_live
 
         if live_on:
-            live_candidates, _queries, _raw = fetch_live_knowledge(
-                victim_text,
+            live_candidates, constructed, _raw = fetch_live_knowledge(
+                victim_span,
                 self.live_config,
                 self.api_budget,
                 nlp=nlp,
@@ -263,6 +268,7 @@ class KnowledgeTripletPipeline:
             no_passages_used=not passages_used,
             counseling_bank_used=sum(1 for c in ranked if c.source == "counseling_bank"),
             filtered_triplets=filtered,
+            constructed_queries=constructed,
         )
 
     def run_raw_knowledge(self, knowledge_text: str) -> List[str]:
@@ -278,6 +284,7 @@ class KnowledgeTripletPipeline:
         used_text = " ".join(hybrid.passages_used)
         return {
             "ranking_query": hybrid.ranking_query,
+            "constructed_queries": [q.to_dict() for q in hybrid.constructed_queries],
             "reply_knowledge": hybrid.verbalized,
             "verbalized": hybrid.verbalized,
             "ranked_candidates": [c.to_dict() for c in hybrid.ranked_candidates],

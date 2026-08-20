@@ -191,6 +191,21 @@ def extract_entities(victim_utterance: str, nlp=None) -> List[Dict[str, str]]:
     if re.search(r"has not returned|did not return|not returned|missing", lower):
         add("missing person", CATEGORY_CRIME)
 
+    if re.search(r"kicked me|out of the house|thrown out", lower):
+        add("desertion", CATEGORY_CRIME)
+
+    if re.search(r"\b(posh|workplace|employer)\b", lower) or (
+        "office" in lower and re.search(r"called|terminate|harass", lower)
+    ):
+        add("sexual harassment", CATEGORY_CRIME)
+        add("posh", CATEGORY_LEGAL)
+
+    if re.search(r"\b(loan|recovery agent)\b", lower):
+        add("harassment", CATEGORY_CRIME)
+
+    if re.search(r"where to go|whom to ask|who to ask|going insane", lower):
+        add("mental health", CATEGORY_MENTAL_HEALTH)
+
     for match in _SECTION_RE.finditer(victim_utterance):
         add(f"section {match.group(1)}", CATEGORY_LEGAL)
 

@@ -68,7 +68,10 @@ def ranking_query_from_history(dialog_history: str, nlp=None) -> str:
         text = f"{recent[0]} {recent[1]} {recent[1]}"
     entities = extract_entities(" ".join(recent), nlp=nlp)
     extra = " ".join(entity["text"] for entity in entities)
-    return f"{text} {extra}".strip()
+    from ktc.query_builder import ranking_hints_for_dialogue
+
+    hints = ranking_hints_for_dialogue(" ".join(recent))
+    return f"{text} {extra} {hints}".strip()
 
 
 def apply_score_gate(

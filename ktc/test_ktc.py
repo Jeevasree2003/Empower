@@ -874,6 +874,59 @@ class TestEntityExtraction(unittest.TestCase):
         self.assertTrue(any("on instagram" in t for t in texts), msg=texts)
         self.assertFalse(any("on online" in t for t in texts))
 
+    def test_help_seeking_dialogue_constructs_contact_queries(self):
+        from ktc.query_builder import dialogue_situations
+
+        utterance = (
+            "I am going insane . I don't understand where to go and whom to ask for help ."
+        )
+        self.assertIn("help_seeking", dialogue_situations(utterance))
+        queries = build_queries(
+            [{"text": "insane", "category": CATEGORY_MENTAL_HEALTH}],
+            max_queries=3,
+            victim_text=utterance,
+        )
+        joined = " ".join(q.text.lower() for q in queries)
+        self.assertTrue(queries)
+        self.assertIn("kiran", joined)
+        self.assertRegex(joined, r"whom to contact|where to get mental health help")
+        self.assertNotIn("treatment for", joined)
+        self.assertNotIn("policy", joined)
+        self.assertNotIn("suicide prevention", joined)
+
+    def test_homicide_dialogue_constructs_fir_and_intimidation_queries(self):
+        utterance = "Hi Rakshak, my husband is planning to kill me with her secret"
+        queries = build_queries(
+            [{"text": "kill", "category": CATEGORY_CRIME}],
+            max_queries=3,
+            victim_text=utterance,
+        )
+        joined = " ".join(q.text.lower() for q in queries)
+        self.assertRegex(joined, r"fir|police")
+        self.assertRegex(joined, r"506|intimidation|302")
+        self.assertNotIn("what is kill under indian law", joined)
+        self.assertNotIn("romance", joined)
+
+    def test_utterance_without_lexicon_entity_still_builds_queries(self):
+        queries = build_queries(
+            [],
+            max_queries=2,
+            victim_text="I don't understand where to go and whom to ask for help.",
+        )
+        self.assertTrue(queries)
+        self.assertGreaterEqual(len(queries[0].text.split()), 4)
+        self.assertIn("helpline", queries[0].text.lower())
+
+    def test_kicked_out_dialogue_queries_pwdva(self):
+        queries = build_queries(
+            [],
+            max_queries=3,
+            victim_text="my husband has kicked me out of the house along with kids",
+        )
+        joined = " ".join(q.text.lower() for q in queries)
+        self.assertIn("residence", joined)
+        self.assertIn("domestic violence", joined)
+
 
 class TestCounselingBank(unittest.TestCase):
     def test_bank_returns_both_domains_for_victim_utterance(self):
@@ -1156,6 +1209,10 @@ class TestPipelineIntegration(unittest.TestCase):
         self.assertNotIn("kicked me", joined)
         self.assertNotIn("filtered_triplets", result)
         self.assertIn("reply_knowledge", result)
+        self.assertTrue(result["constructed_queries"])
+        qtext = " ".join(q["query"].lower() for q in result["constructed_queries"])
+        self.assertIn("kiran", qtext)
+        self.assertRegex(qtext, r"whom to contact|where to get mental health help")
 
     def test_full_kare_dialogues_100_500_3000(self):
         if not DATA_PATH.exists():

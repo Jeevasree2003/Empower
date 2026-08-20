@@ -58,7 +58,11 @@ def fetch_live_knowledge(
     logger.info("live utterance=%r", victim_utterance)
     entities = extract_entities(victim_utterance, nlp=nlp)
     logger.info("live entities=%s", [e.get("text") for e in entities])
-    queries = build_queries(entities, max_queries=config.max_live_queries_per_dialogue)
+    queries = build_queries(
+        entities,
+        max_queries=config.max_live_queries_per_dialogue,
+        victim_text=victim_utterance,
+    )
     logger.info("live queries=%s", [q.text for q in queries])
 
     candidates: List[KnowledgeCandidate] = []
