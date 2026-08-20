@@ -11,7 +11,7 @@ from ktc.knowledge_item import KnowledgeCandidate
 from ktc.triplet import Triplet
 
 MIN_COSINE = 0.38
-MAX_RANKED = 5
+MAX_RANKED = 8
 
 
 @dataclass
@@ -66,7 +66,7 @@ def ranking_query_from_history(dialog_history: str, nlp=None) -> str:
         text = recent[0]
     else:
         text = f"{recent[0]} {recent[1]} {recent[1]}"
-    entities = extract_entities(recent[-1], nlp=nlp)
+    entities = extract_entities(" ".join(recent), nlp=nlp)
     extra = " ".join(entity["text"] for entity in entities)
     return f"{text} {extra}".strip()
 

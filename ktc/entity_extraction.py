@@ -43,6 +43,9 @@ _CRIME_TERMS = (
     "eve teasing",
     "eve-teasing",
     "life in risk",
+    "desertion",
+    "bigamy",
+    "missing person",
 )
 
 _MENTAL_HEALTH_TERMS = (
@@ -177,6 +180,16 @@ def extract_entities(victim_utterance: str, nlp=None) -> List[Dict[str, str]]:
         r"\blife\s+(?:at|in)\s+risk\b", lower
     ):
         add("threat to life", CATEGORY_CRIME)
+
+    if re.search(
+        r"another marriage|going to get another marriage|not divorced|left me",
+        lower,
+    ):
+        add("desertion", CATEGORY_CRIME)
+        add("bigamy", CATEGORY_CRIME)
+
+    if re.search(r"has not returned|did not return|not returned|missing", lower):
+        add("missing person", CATEGORY_CRIME)
 
     for match in _SECTION_RE.finditer(victim_utterance):
         add(f"section {match.group(1)}", CATEGORY_LEGAL)

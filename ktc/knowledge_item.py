@@ -13,10 +13,11 @@ class KnowledgeCandidate:
     """One rankable knowledge item from static KTC or live retrieval."""
 
     text: str
-    source: str  # "static_dataset" | "live_api"
+    source: str  # "static_dataset" | "live_api" | "counseling_bank"
     url: Optional[str] = None
     query: Optional[str] = None
     triplet: Optional[Triplet] = None
+    domain: Optional[str] = None  # "legal" | "clinical" | None
 
     def to_dict(self) -> dict:
         payload = {
@@ -24,6 +25,7 @@ class KnowledgeCandidate:
             "source": self.source,
             "url": self.url,
             "query": self.query,
+            "domain": self.domain,
         }
         if self.triplet is not None:
             payload["triplet"] = self.triplet.to_dict()

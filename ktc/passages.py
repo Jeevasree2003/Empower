@@ -14,18 +14,31 @@ DEFAULT_PASSAGE_TOP_N = 3
 
 
 def split_knowledge_passages(raw_text: str) -> List[str]:
-    """Split a KARE knowledge field on ``<K#>`` tags, then clean each chunk."""
+    """Split a KARE knowledge field on ``<K#>`` tags or sentence windows."""
     text = raw_text or ""
-    parts = _K_SPLIT.split(text)
+    tagged = _K_SPLIT.split(text)
+    chunks = tagged if len(tagged) > 1 else [text]
     passages: List[str] = []
-    for part in parts:
+    for part in chunks:
         cleaned = clean_knowledge_text(part)
-        if cleaned:
-            passages.append(cleaned)
-    if passages:
-        return passages
-    cleaned = clean_knowledge_text(text)
-    return [cleaned] if cleaned else []
+        if not cleaned:
+            continue
+        passages.extend(_sentence_windows(cleaned))
+    return passages
+
+
+def _sentence_windows(cleaned: str, window: int = 2) -> List[str]:
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", cleaned) if len(s.strip()) > 20]
+    if not sentences:
+        return [cleaned] if cleaned else []
+    if len(sentences) <= 3:
+        return [cleaned]
+    windows: List[str] = []
+    for i in range(0, len(sentences), window):
+        chunk = " ".join(sentences[i : i + window]).strip()
+        if chunk:
+            windows.append(chunk)
+    return windows
 
 
 def select_relevant_passages(
@@ -58,3 +71,30 @@ def select_relevant_passages(
         if len(selected) >= top_n:
             break
     return selected
+
+
+def select_dual_domain_passages(
+    passages: Sequence[str],
+    base_query: str,
+    ranker,
+    top_n: int = DEFAULT_PASSAGE_TOP_N,
+    min_cosine: float = 0.38,
+) -> List[Tuple[str, float]]:
+    """Score passages against legal and clinical expansions of the user need."""
+    if not base_query.strip():
+        return []
+    legal_q = f"{base_query} FIR police complaint Indian law helpline protection"
+    clinical_q = f"{base_query} mental health counseling crisis helpline safety"
+    merged: List[Tuple[str, float]] = []
+    seen = set()
+    for query in (legal_q, clinical_q, base_query):
+        for passage, score in select_relevant_passages(
+            passages, query, ranker, top_n=top_n, min_cosine=min_cosine
+        ):
+            key = passage[:200]
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append((passage, score))
+    merged.sort(key=lambda item: item[1], reverse=True)
+    return merged[: max(top_n, 2)]

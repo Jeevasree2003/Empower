@@ -31,11 +31,12 @@ from ktc.verbalization import verbalize_llm, verbalize_template, verbalize_tripl
 
 # KARE.jsonl path: env override, then repo-relative default; skip integration tests if missing.
 _DATA_ENV = os.environ.get("KARE_JSONL_PATH")
+_WORKSPACE = Path(__file__).resolve().parents[1]
 if _DATA_ENV:
     DATA_PATH = Path(_DATA_ENV)
 else:
-    DATA_PATH = Path(__file__).resolve().parents[2].parent / "KARE-data" / "KARE" / "Data" / "KARE.jsonl"
-SAMPLE_PATH = Path(__file__).resolve().parents[1] / "dataset" / "KARE-Sample.json"
+    DATA_PATH = _WORKSPACE / "KARE-data" / "KARE" / "Data" / "KARE.jsonl"
+SAMPLE_PATH = _WORKSPACE / "dataset" / "KARE-Sample.json"
 
 BAD_COREF_HEADS = frozenset({"all the tasks", "millennials", "the matter"})
 
@@ -853,6 +854,26 @@ class TestEntityExtraction(unittest.TestCase):
         self.assertFalse(any("on online" in t for t in texts))
 
 
+class TestCounselingBank(unittest.TestCase):
+    def test_bank_returns_both_domains_for_victim_utterance(self):
+        from ktc.counseling_bank import DOMAIN_CLINICAL, DOMAIN_LEGAL, counseling_candidates
+
+        items = counseling_candidates(
+            [{"text": "dying", "category": CATEGORY_MENTAL_HEALTH}],
+            "I am dying everyday bit by bit",
+        )
+        domains = {c.domain for c in items}
+        self.assertEqual(domains, {DOMAIN_CLINICAL, DOMAIN_LEGAL})
+        texts = " ".join(c.text.lower() for c in items)
+        self.assertIn("helpline", texts)
+        self.assertTrue("fir" in texts or "181" in texts)
+
+    def test_bank_empty_without_victim_text(self):
+        from ktc.counseling_bank import counseling_candidates
+
+        self.assertEqual(counseling_candidates([], ""), [])
+
+
 class TestNltkSetup(unittest.TestCase):
     def test_resource_table_covers_filter_tagger(self):
         from ktc.nltk_setup import NLTK_RESOURCES, setup_command
@@ -980,7 +1001,86 @@ class TestPipelineIntegration(unittest.TestCase):
             "user: my husband said he will murder me tonight.",
             enable_live=False,
         )
-        self.assertEqual(result.verbalized, [])
+        joined = " ".join(result.verbalized).lower()
+        self.assertTrue(result.verbalized)
+        self.assertGreaterEqual(result.counseling_bank_used, 2)
+        self.assertTrue(any("helpline" in s.lower() or "112" in s for s in result.verbalized))
+        self.assertTrue(any("fir" in s.lower() or "police" in s.lower() for s in result.verbalized))
+        self.assertNotIn("romance scam", joined)
+        self.assertNotIn("kinjal", joined)
+
+    def test_dying_turn_covers_legal_and_clinical(self):
+        from ktc.ranking import CandidateRankingResult
+        from ktc.pipeline import KnowledgeTripletPipeline
+
+        class _LowRanker:
+            model = None
+
+            def rank_candidates_with_scores(self, dialog_history, candidates, top_k=26):
+                cl = list(candidates)
+                scores = [0.21] * len(cl)
+                return CandidateRankingResult(cl[:top_k], scores[:top_k], 0.21)
+
+        pipeline = KnowledgeTripletPipeline(
+            verbalization_backend="template",
+            coref_backend="heuristic",
+            ranker=_LowRanker(),
+        )
+        result = pipeline.run_hybrid(
+            "Once you deal with stress yoga will help you succeed in every step.",
+            "bot: Hello. user: I am dying everyday bit by bit .",
+            enable_live=False,
+        )
+        joined = " ".join(result.verbalized).lower()
+        self.assertIn("kiran", joined)
+        self.assertTrue("fir" in joined or "181" in joined or "police" in joined)
+        self.assertNotIn("yoga", joined)
+
+    def test_full_kare_dialogues_100_500_3000(self):
+        if not DATA_PATH.exists():
+            self.skipTest("KARE.jsonl not available")
+        from ktc.pipeline import KnowledgeTripletPipeline
+
+        pipeline = KnowledgeTripletPipeline(
+            verbalization_backend="template",
+            coref_backend="heuristic",
+            ranker=self._passthrough_ranker(),
+        )
+        specs = {"100": 0, "500": 0, "3000": 1}
+        found = {}
+        with DATA_PATH.open(encoding="utf-8") as f:
+            for line in f:
+                record = json.loads(line)
+                did = str(record["dialogue_id"])
+                if did in specs and did not in found:
+                    found[did] = record
+                if len(found) == len(specs):
+                    break
+        self.assertEqual(set(found), set(specs))
+        for did, record in found.items():
+            with self.subTest(dialogue_id=did):
+                utterances = sorted(record["utterances"], key=lambda u: int(u["utterance_no"]))
+                history = []
+                target = None
+                bot_turn = 0
+                for utterance in utterances:
+                    role = utterance["author_role"]
+                    text = f"{role}: {utterance['utterance'].strip()}"
+                    if role in {"bot", "agent"} and history:
+                        if bot_turn == specs[did]:
+                            target = " ".join(history)
+                            break
+                        bot_turn += 1
+                    history.append(text)
+                self.assertIsNotNone(target)
+                result = pipeline.inspect(record["knowledge"], target, enable_live=False)
+                joined = " ".join(result["verbalized"]).lower()
+                self.assertTrue(result["verbalized"], msg=did)
+                self.assertGreaterEqual(result["counseling_bank_used"], 2, msg=did)
+                self.assertRegex(joined, r"helpline|kiran|icall|112")
+                self.assertRegex(joined, r"fir|police|181|ncw|complaint")
+                self.assertNotIn("kinjal", joined)
+                self.assertNotIn("romance scam", joined)
 
     def test_sample_dialogues_100_and_500_do_not_crash(self):
         if not SAMPLE_PATH.exists():

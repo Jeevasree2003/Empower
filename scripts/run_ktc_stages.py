@@ -48,7 +48,12 @@ def history_at_turn(dialogue: dict, turn: int) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Inspect gated KTC stages for one turn.")
-    parser.add_argument("--input", type=Path, required=True, help="KARE.jsonl (or KARE-Sample.json) path")
+    parser.add_argument(
+        "--input",
+        type=Path,
+        default=Path("KARE-data/KARE/Data/KARE.jsonl"),
+        help="KARE.jsonl path",
+    )
     parser.add_argument("--dialogue_id", required=True)
     parser.add_argument("--turn", type=int, default=0, help="Bot turn index (0 = first agent reply with history)")
     parser.add_argument(

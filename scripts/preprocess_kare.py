@@ -130,7 +130,7 @@ def preprocess(
     knowledge_mode: str = "ktc",
     verbalization_backend: str = "llm",
     coref_backend: str = "heuristic",
-    top_k: int = 5,
+    top_k: int = 8,
     max_dialogues: Optional[int] = None,
     enable_live: bool = False,
 ) -> Dict[str, int]:
@@ -194,7 +194,7 @@ def main():
         default="heuristic",
         help="Coreference backend for Stage 2c (heuristic=local rules, model=coreferee).",
     )
-    parser.add_argument("--top_k", type=int, default=5)
+    parser.add_argument("--top_k", type=int, default=8)
     parser.add_argument(
         "--max_dialogues",
         type=int,

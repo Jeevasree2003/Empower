@@ -79,7 +79,7 @@ Implemented in `ktc/` with five testable sub-modules:
 | 2a | `ktc/extraction.py` | spaCy dependency OpenIE — **all clause verbs**, not ROOT-only |
 | 2b | `ktc/filtering.py` | Paper filtering rules (a–e) |
 | 2c | `ktc/coreference.py` | Heuristic pronoun resolution (default; same/previous sentence, skip pronoun-only lookback). Optional **coreferee**. |
-| 2d | `ktc/ranking.py` | Passage-first SBERT ranking: cosine **≥ 0.38**, at most **5** triples. Ranking query = last 1–2 victim/user turns. |
+| 2d | `ktc/ranking.py` + `ktc/counseling_bank.py` | Passage-first SBERT (cosine ≥ 0.38). If the KARE blob is off-topic, inject grounded **legal + clinical** counseling facts so live victim turns still receive both domains. |
 | 2e | `ktc/verbalization.py` | **LLM few-shot verbalization** (default; Groq via `LLM_API_KEY`) with template fallback |
 
 ### Verbalization choice (Stage 2e)
@@ -116,8 +116,10 @@ training knowledge is `no_passages_used` (see `scripts/preprocess_kare.py`).
 Re-test a turn (static; add `--enable-live` only when API keys are set):
 
 ```bash
-python scripts/run_ktc_stages.py --input dataset/KARE-Sample.json --dialogue_id 100 --turn 0
-python scripts/run_ktc_stages.py --input dataset/KARE-Sample.json --dialogue_id 500 --turn 0
+python scripts/run_ktc_stages.py --input KARE-data/KARE/Data/KARE.jsonl --dialogue_id 100 --turn 0
+python scripts/run_ktc_stages.py --input KARE-data/KARE/Data/KARE.jsonl --dialogue_id 100 --turn 1
+python scripts/run_ktc_stages.py --input KARE-data/KARE/Data/KARE.jsonl --dialogue_id 500 --turn 0
+python scripts/run_ktc_stages.py --input KARE-data/KARE/Data/KARE.jsonl --dialogue_id 3000 --turn 1
 ```
 
 ### Live retrieval query policy (Stage 0.5)

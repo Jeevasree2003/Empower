@@ -48,6 +48,8 @@ _CRIME_IPC_SECTION: Dict[str, str] = {
     "murder or homicide threat": "302",
     "homicide": "302",
     "criminal intimidation": "506",
+    "bigamy": "494",
+    "desertion": "498A",
 }
 
 # Legal entities that mean "lodge/FIR" procedure, not abstract definitions.
