@@ -180,31 +180,34 @@ def _is_crisis_entity(raw_text: str, canonical: str) -> bool:
 def _mental_health_queries(entity: str, raw_entity: str = "") -> List[SearchQuery]:
     queries: List[SearchQuery] = []
     if _is_crisis_entity(raw_entity, entity):
-        queries.extend(
-            [
-                SearchQuery(
-                    f"24/7 suicide prevention helpline number India {CURRENT_YEAR}",
-                    entity,
-                    CATEGORY_MENTAL_HEALTH,
-                    "mh_crisis_helpline",
-                ),
-                SearchQuery(
-                    f"mental health crisis support helpline India {CURRENT_YEAR}",
-                    entity,
-                    CATEGORY_MENTAL_HEALTH,
-                    "mh_crisis_support",
-                ),
-            ]
-        )
-    else:
-        queries.append(
+        return [
             SearchQuery(
-                f"What are the symptoms of {entity}?",
+                f"KIRAN mental health helpline 1800-599-0019 mohfw India {CURRENT_YEAR}",
                 entity,
                 CATEGORY_MENTAL_HEALTH,
-                "mh_symptoms",
-            )
+                "mh_crisis_helpline",
+            ),
+            SearchQuery(
+                f"24/7 suicide prevention helpline number India {CURRENT_YEAR}",
+                entity,
+                CATEGORY_MENTAL_HEALTH,
+                "mh_crisis_helpline",
+            ),
+            SearchQuery(
+                f"mental health crisis support helpline India {CURRENT_YEAR}",
+                entity,
+                CATEGORY_MENTAL_HEALTH,
+                "mh_crisis_support",
+            ),
+        ]
+    queries.append(
+        SearchQuery(
+            f"What are the symptoms of {entity}?",
+            entity,
+            CATEGORY_MENTAL_HEALTH,
+            "mh_symptoms",
         )
+    )
     queries.append(
         SearchQuery(
             f"current treatment for {entity} in India {CURRENT_YEAR}",

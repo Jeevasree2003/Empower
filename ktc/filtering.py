@@ -31,7 +31,24 @@ CONJUNCTIONS = {
 
 # Rule 6 — reject bare pronoun / deictic heads (coref failed or never ran).
 _GENERIC_PRONOUN_HEADS = frozenset(
-    {"it", "this", "that", "these", "those", "he", "she", "they", "we", "i", "you"}
+    {
+        "it",
+        "this",
+        "that",
+        "these",
+        "those",
+        "he",
+        "she",
+        "they",
+        "we",
+        "i",
+        "you",
+        "me",
+        "us",
+        "him",
+        "her",
+        "them",
+    }
 )
 
 # Rule 7 — reject tails that are only an unresolved pronoun.
@@ -52,8 +69,11 @@ _DATE_RE = re.compile(
 
 _BOILERPLATE_FRAGMENTS = (
     "logged in to post a comment",
-    "will be in touch with you shortly",
-    "the legal team of online legal india",
+    "will be in touch with you",
+    "online legal india",
+    "received your complaint request",
+    "consumer complaint against mental harassment",
+    "appreciate your efforts in reaching out",
 )
 
 _MAX_TAIL_WORDS = 12
@@ -95,9 +115,28 @@ def _starts_with_conjunction(text: str) -> bool:
     return first in CONJUNCTIONS
 
 
+def _is_garbage_span(text: str) -> bool:
+    """OCR / broken tokens that should never reach verbalization."""
+    lowered = text.lower()
+    if re.search(r"\b(?:ca|did|wo|is|are|was)\s+n't\b", lowered):
+        return True
+    if re.search(r"\b(?:withoiut|wlhe|ammount|loam form|dipressed|harrasment)\b", lowered):
+        return True
+    words = re.findall(r"[a-z']+", lowered)
+    if len(words) == 1 and len(words[0]) >= 4 and not re.search(r"[aeiou]", words[0]):
+        return True
+    return False
+
+
 def _is_bare_pronoun_head(head: str) -> bool:
     words = re.findall(r"[a-z']+", head.strip().lower())
     return len(words) == 1 and words[0] in _GENERIC_PRONOUN_HEADS
+
+
+def _is_deictic_subject_head(head: str) -> bool:
+    """Comment-thread subjects like they/he/I/you — not 'my husband' or 'Our Legal Team'."""
+    first = head.strip().split()[0].lower().strip(".,;:!?'\"()[]{}")
+    return first in {"i", "me", "you", "we", "they", "he", "she", "it"}
 
 
 def _is_unresolved_pronoun_tail(tail: str) -> bool:
@@ -151,9 +190,13 @@ def passes_filters(triplet: Triplet) -> bool:
         return False
     if _starts_with_conjunction(triplet.head) or _starts_with_conjunction(triplet.tail):
         return False
-    if _is_bare_pronoun_head(triplet.head):
+    if _is_bare_pronoun_head(triplet.head) or _is_deictic_subject_head(triplet.head):
         return False
     if _is_unresolved_pronoun_tail(triplet.tail):
+        return False
+    if _is_garbage_span(triplet.head) or _is_garbage_span(triplet.relation) or _is_garbage_span(triplet.tail):
+        return False
+    if triplet.relation.strip().lower() in {"m", "am", "'m"}:
         return False
     if _relation_is_stopword_only(triplet.relation):
         return False

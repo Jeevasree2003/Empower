@@ -41,6 +41,17 @@ def _sentence_windows(cleaned: str, window: int = 2) -> List[str]:
     return windows
 
 
+def _is_junk_passage(passage: str) -> bool:
+    lowered = passage.lower()
+    if "online legal india" in lowered or "received your complaint request" in lowered:
+        return True
+    if "consumer complaint against mental harassment" in lowered:
+        return True
+    if lowered.count(" i ") >= 4 and ("they called" in lowered or "terminate me" in lowered):
+        return True
+    return False
+
+
 def select_relevant_passages(
     passages: Sequence[str],
     query: str,
@@ -51,15 +62,18 @@ def select_relevant_passages(
     """Return ``(passage, score)`` for the top passages at or above *min_cosine*."""
     if not query.strip() or not passages:
         return []
+    usable = [p for p in passages if not _is_junk_passage(p)]
+    if not usable:
+        return []
 
     model = getattr(ranker, "model", None)
     if model is None:
-        return [(p, 1.0) for p in list(passages)[:top_n]]
+        return [(p, 1.0) for p in usable[:top_n]]
 
     import numpy as np
 
     query_emb = model.encode(query.strip(), normalize_embeddings=True)
-    embs = model.encode(list(passages), normalize_embeddings=True)
+    embs = model.encode(list(usable), normalize_embeddings=True)
     scores = np.dot(embs, query_emb)
     order = np.argsort(-scores)
     selected: List[Tuple[str, float]] = []
@@ -67,7 +81,7 @@ def select_relevant_passages(
         score = float(scores[idx])
         if score < min_cosine:
             continue
-        selected.append((passages[int(idx)], score))
+        selected.append((usable[int(idx)], score))
         if len(selected) >= top_n:
             break
     return selected
@@ -79,15 +93,20 @@ def select_dual_domain_passages(
     ranker,
     top_n: int = DEFAULT_PASSAGE_TOP_N,
     min_cosine: float = 0.38,
+    include_legal: bool = False,
+    include_clinical: bool = True,
 ) -> List[Tuple[str, float]]:
-    """Score passages against legal and clinical expansions of the user need."""
+    """Score passages against the user need; only expand legal when the turn is legal."""
     if not base_query.strip():
         return []
-    legal_q = f"{base_query} FIR police complaint Indian law helpline protection"
-    clinical_q = f"{base_query} mental health counseling crisis helpline safety"
+    queries = [base_query]
+    if include_clinical:
+        queries.append(f"{base_query} mental health counseling crisis helpline safety")
+    if include_legal:
+        queries.append(f"{base_query} FIR police complaint Indian law helpline protection")
     merged: List[Tuple[str, float]] = []
     seen = set()
-    for query in (legal_q, clinical_q, base_query):
+    for query in queries:
         for passage, score in select_relevant_passages(
             passages, query, ranker, top_n=top_n, min_cosine=min_cosine
         ):

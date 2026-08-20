@@ -12,7 +12,14 @@ MONTHS = (
 _BOILERPLATE = (
     "you must be logged in to post a comment",
     "The Legal Team of Online Legal India",
+    "Team Online Legal India",
     "will be in touch with you shortly",
+    "will be in touch with you soon",
+    "We have received your complaint request",
+    "we appreciate your efforts in reaching out to us",
+    "filing a Consumer Complaint against Mental Harassment",
+    "filing a consumer complaint against Mental Harassment",
+    "filing consumer complaint against Mental Harassment",
 )
 
 
@@ -62,7 +69,22 @@ def clean_knowledge_text(text: str) -> str:
             continue
         for sent in re.split(r"(?<=[.!?])\s+", chunk):
             sent = sent.strip()
-            if len(sent) > 20:
-                sentences.append(sent)
+            if len(sent) <= 20:
+                continue
+            if _is_comment_noise(sent):
+                continue
+            sentences.append(sent)
 
     return " ".join(sentences)
+
+
+def _is_comment_noise(sent: str) -> bool:
+    """Drop scraped form replies and first-person comment-thread sentences."""
+    lowered = sent.lower()
+    if "online legal india" in lowered:
+        return True
+    if "hello team" in lowered or "hi tejal" in lowered:
+        return True
+    if lowered.startswith("hi i ") or lowered.startswith("hello i "):
+        return True
+    return False

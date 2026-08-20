@@ -72,13 +72,10 @@ def main() -> None:
         print(f"history preview: {history[:160]}{'...' if len(history) > 160 else ''}")
 
         result = pipeline.inspect(knowledge, history, enable_live=False)
-        print(f"raw_triplets: {len(result['raw_triplets'])}")
-        print(f"filtered_triplets: {len(result['filtered_triplets'])}")
-        print("--- raw (first 12) ---")
-        for triplet in result["raw_triplets"][:12]:
-            print(f"  {triplet}")
-        print("--- verbalized top-ranked (first 12) ---")
-        for sentence in result["verbalized"][:12]:
+        print(f"filtered_triplet_count: {result.get('filtered_triplet_count')}")
+        print(f"counseling_bank_used: {result.get('counseling_bank_used')}")
+        print("--- reply knowledge ---")
+        for sentence in result.get("reply_knowledge") or result["verbalized"]:
             print(f"  {sentence}")
         print()
 

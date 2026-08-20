@@ -35,6 +35,11 @@ _META_COMMENTARY_PATTERN = re.compile(
     r"(the source does not|this page does not|no information is provided|the text does not mention)",
     re.IGNORECASE,
 )
+_NON_COUNSELOR_PROSE = re.compile(
+    r"policy makers|member states|\bdaly\b|economic loss|who estimates|"
+    r"100\s*000 population|disability-adjusted",
+    re.IGNORECASE,
+)
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
 _QUERY_STOPWORDS = frozenset(
     {
@@ -80,6 +85,8 @@ def extractive_sentences(query: str, text: str, max_n: int = 3) -> List[str]:
         if len(line) < 40 or len(line) > 420:
             continue
         if _is_meta_commentary(line):
+            continue
+        if _NON_COUNSELOR_PROSE.search(line):
             continue
         stoks = set(re.findall(r"[a-z0-9]+", line.lower()))
         overlap = len(tokens & stoks)
@@ -141,6 +148,8 @@ def _parse_sentences(raw: str) -> List[str]:
         if line_norm == NO_RELEVANT_INFO or line_norm.startswith(f"{NO_RELEVANT_INFO}_"):
             continue
         if _is_meta_commentary(line):
+            continue
+        if _NON_COUNSELOR_PROSE.search(line):
             continue
         if len(line) > 20 or _is_short_fact(line):
             lines.append(line)

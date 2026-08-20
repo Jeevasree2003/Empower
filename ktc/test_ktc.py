@@ -208,6 +208,12 @@ class TestFiltering(unittest.TestCase):
     def test_rejects_repeated_tokens(self):
         self.assertFalse(passes_filters(Triplet("People", "Do", "Yoga Yoga")))
 
+    def test_rejects_deictic_comment_heads(self):
+        self.assertFalse(passes_filters(Triplet("they", "called", "me")))
+        self.assertFalse(passes_filters(Triplet("he", "is", "law")))
+        self.assertFalse(passes_filters(Triplet("wlhe", "ca n't control", "his anger")))
+        self.assertFalse(passes_filters(Triplet("t Team Online Legal India", "will be in", "touch with you")))
+
     def test_rejects_near_duplicate_head_tail(self):
         self.assertFalse(passes_filters(Triplet("the police station", "helps", "police station")))
 
@@ -628,18 +634,20 @@ class TestLiveSummarize(unittest.TestCase):
         self.assertIn("Section 506", parsed[0])
         self.assertIn("1930", parsed[1])
 
-    def test_parse_sentences_keeps_dialogue_100_style_facts(self):
+    def test_parse_sentences_drops_statistical_who_prose(self):
         from ktc.live_summarize import _parse_sentences
 
-        facts = [
+        dropped = [
             "The World Health Organization estimates the age-adjusted suicide rate per 100 000 population in India is 21.1.",
             "The burden of mental health problems in India is 2443 disability-adjusted life years (DALYs) per 100 000 population.",
             "The economic loss due to mental health conditions in India, between 2012-2030, is estimated at USD 1.03 trillion.",
             "Policy makers are encouraged to promote availability of and access to cost-effective treatment of common mental disorders at the primary health care level.",
         ]
-        for fact in facts:
-            parsed = _parse_sentences(fact)
-            self.assertEqual(parsed, [fact], msg=fact)
+        for fact in dropped:
+            self.assertEqual(_parse_sentences(fact), [], msg=fact)
+
+        kept = "The KIRAN helpline 1800-599-0019 provides 24x7 mental health support in India."
+        self.assertEqual(_parse_sentences(kept), [kept])
 
     def test_per_source_attribution(self):
         import sys
@@ -708,6 +716,19 @@ class TestLiveSummarize(unittest.TestCase):
         self.assertEqual(sentences[0].source_url, "https://indiacode.nic.in/376")
         self.assertIn("376", sentences[0].sentence)
         self.assertIn("rape", sentences[0].sentence.lower())
+
+    def test_extractive_sentences_skip_policy_maker_lines(self):
+        from ktc.live_summarize import extractive_sentences
+
+        text = (
+            "Policy makers should be encouraged to promote availability of and access to "
+            "cost-effective treatment of common mental disorders at the primary health care level. "
+            "KIRAN is a 24x7 mental health helpline 1800-599-0019 operated for distress support in India."
+        )
+        selected = extractive_sentences("mental health helpline India", text)
+        joined = " ".join(selected).lower()
+        self.assertNotIn("policy makers", joined)
+        self.assertTrue("kiran" in joined or "1800" in joined)
 
 
 class TestLiveKnowledge(unittest.TestCase):
@@ -866,12 +887,72 @@ class TestCounselingBank(unittest.TestCase):
         self.assertEqual(domains, {DOMAIN_CLINICAL, DOMAIN_LEGAL})
         texts = " ".join(c.text.lower() for c in items)
         self.assertIn("helpline", texts)
-        self.assertTrue("fir" in texts or "181" in texts)
+        self.assertTrue("181" in texts or "nalsa" in texts or "legal" in texts)
 
     def test_bank_empty_without_victim_text(self):
         from ktc.counseling_bank import counseling_candidates
 
         self.assertEqual(counseling_candidates([], ""), [])
+
+    def test_insane_turn_prefers_helplines_not_fir(self):
+        from ktc.counseling_bank import counseling_candidates
+
+        items = counseling_candidates(
+            [{"text": "insane", "category": CATEGORY_MENTAL_HEALTH}],
+            "I am going insane. I don't understand where to go and whom to ask for help.",
+        )
+        joined = " ".join(c.text.lower() for c in items)
+        self.assertIn("kiran", joined)
+        self.assertIn("icall", joined)
+        self.assertTrue("181" in joined or "nalsa" in joined)
+        self.assertNotIn("crpc section 154", joined)
+        self.assertNotIn("policy makers", joined)
+
+    def test_kicked_out_adds_residence_knowledge(self):
+        from ktc.counseling_bank import counseling_candidates
+
+        items = counseling_candidates(
+            [],
+            "my husband has kicked me out of the house along with kids",
+        )
+        joined = " ".join(c.text.lower() for c in items)
+        self.assertIn("residence", joined)
+        self.assertIn("kiran", joined)
+
+
+class TestReplyKnowledge(unittest.TestCase):
+    def test_drops_comment_thread_anecdotes_and_policy_text(self):
+        from ktc.knowledge_item import KnowledgeCandidate
+        from ktc.reply_knowledge import assemble_reply_knowledge
+
+        ranked = assemble_reply_knowledge(
+            [
+                KnowledgeCandidate(
+                    text="My husband has kicked me.",
+                    source="static_dataset",
+                ),
+                KnowledgeCandidate(
+                    text="Policy makers should be encouraged to promote availability of treatment.",
+                    source="live_api",
+                    url="https://www.who.int/india/health-topics/mental-health",
+                ),
+                KnowledgeCandidate(
+                    text="KIRAN, the national mental health helpline 1800-599-0019, offers 24x7 distress support in India.",
+                    source="counseling_bank",
+                    domain="clinical",
+                ),
+                KnowledgeCandidate(
+                    text="You do not have to file a police case before getting emotional support; 181 or NALSA legal aid can help if you later need legal information or protection.",
+                    source="counseling_bank",
+                    domain="legal",
+                ),
+            ]
+        )
+        texts = [c.text.lower() for c in ranked]
+        self.assertTrue(any("kiran" in t for t in texts))
+        self.assertTrue(any("nalsa" in t for t in texts))
+        self.assertFalse(any("kicked me" in t for t in texts))
+        self.assertFalse(any("policy makers" in t for t in texts))
 
 
 class TestNltkSetup(unittest.TestCase):
@@ -1033,8 +1114,48 @@ class TestPipelineIntegration(unittest.TestCase):
         )
         joined = " ".join(result.verbalized).lower()
         self.assertIn("kiran", joined)
-        self.assertTrue("fir" in joined or "181" in joined or "police" in joined)
+        self.assertTrue("181" in joined or "nalsa" in joined or "legal" in joined)
         self.assertNotIn("yoga", joined)
+        self.assertNotIn("policy makers", joined)
+        self.assertIn("112", joined)
+
+    def test_insane_dialogue_brief_is_reply_ready(self):
+        from ktc.ranking import CandidateRankingResult
+        from ktc.pipeline import KnowledgeTripletPipeline
+
+        class _LowRanker:
+            model = None
+
+            def rank_candidates_with_scores(self, dialog_history, candidates, top_k=26):
+                cl = list(candidates)
+                scores = [0.21] * len(cl)
+                return CandidateRankingResult(cl[:top_k], scores[:top_k], 0.21)
+
+        pipeline = KnowledgeTripletPipeline(
+            verbalization_backend="template",
+            coref_backend="heuristic",
+            ranker=_LowRanker(),
+        )
+        blob = (
+            "We have received your complaint request and will get back to you soon "
+            "to resolve your issue by filing a Consumer Complaint against Mental Harassment. "
+            "Team Online Legal India will be in touch. my husband has kicked me. "
+            "Policy makers should be encouraged to promote availability of treatment."
+        )
+        result = pipeline.inspect(
+            blob,
+            "bot: Hello. user: I am going insane . I don't understand where to go and whom to ask for help .",
+            enable_live=False,
+        )
+        joined = " ".join(result["reply_knowledge"]).lower()
+        self.assertIn("kiran", joined)
+        self.assertIn("icall", joined)
+        self.assertTrue("181" in joined or "nalsa" in joined)
+        self.assertNotIn("online legal india", joined)
+        self.assertNotIn("policy makers", joined)
+        self.assertNotIn("kicked me", joined)
+        self.assertNotIn("filtered_triplets", result)
+        self.assertIn("reply_knowledge", result)
 
     def test_full_kare_dialogues_100_500_3000(self):
         if not DATA_PATH.exists():
@@ -1078,9 +1199,11 @@ class TestPipelineIntegration(unittest.TestCase):
                 self.assertTrue(result["verbalized"], msg=did)
                 self.assertGreaterEqual(result["counseling_bank_used"], 2, msg=did)
                 self.assertRegex(joined, r"helpline|kiran|icall|112")
-                self.assertRegex(joined, r"fir|police|181|ncw|complaint")
+                self.assertRegex(joined, r"fir|police|181|ncw|complaint|nalsa|legal")
                 self.assertNotIn("kinjal", joined)
                 self.assertNotIn("romance scam", joined)
+                self.assertNotIn("policy makers", joined)
+                self.assertNotIn("online legal india", joined)
 
     def test_sample_dialogues_100_and_500_do_not_crash(self):
         if not SAMPLE_PATH.exists():

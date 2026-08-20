@@ -8,7 +8,13 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from ktc.coreference import resolve_coreferences
-from ktc.counseling_bank import counseling_candidates, merge_turn_knowledge
+from ktc.counseling_bank import (
+    DOMAIN_CLINICAL,
+    DOMAIN_LEGAL,
+    content_need_domains,
+    counseling_candidates,
+    merge_turn_knowledge,
+)
 from ktc.entity_extraction import extract_entities
 from ktc.extraction import extract_triplets
 from ktc.filtering import filter_triplets
@@ -29,6 +35,7 @@ from ktc.ranking import (
     rank_candidates,
     ranking_query_from_history,
 )
+from ktc.reply_knowledge import assemble_reply_knowledge
 from ktc.triplet import Triplet
 from ktc.verbalization import verbalize_triplets
 
@@ -50,6 +57,7 @@ class HybridRunResult:
     passages_used: List[str] = field(default_factory=list)
     no_passages_used: bool = False
     counseling_bank_used: int = 0
+    filtered_triplets: List[Triplet] = field(default_factory=list)
 
 
 @dataclass
@@ -104,12 +112,17 @@ class KnowledgeTripletPipeline:
         passages = split_knowledge_passages(knowledge_text)
         query = ranking_query_from_history(dialog_history, nlp=self._get_nlp()) if dialog_history else ""
         if query:
+            search_domains = content_need_domains(
+                extract_entities(query, nlp=self._get_nlp()), query
+            )
             selected = select_dual_domain_passages(
                 passages,
                 query,
                 self._get_ranker(),
                 top_n=self.passage_top_n,
                 min_cosine=self.min_cosine,
+                include_legal=DOMAIN_LEGAL in search_domains,
+                include_clinical=DOMAIN_CLINICAL in search_domains or True,
             )
             chosen = [text for text, _score in selected]
         else:
@@ -187,12 +200,15 @@ class KnowledgeTripletPipeline:
         victim_span = " ".join(victim_utterances_from_history(dialog_history)[-2:])
         entities = extract_entities(query or victim_span, nlp=nlp)
         passages = split_knowledge_passages(knowledge_text)
+        search_domains = content_need_domains(entities, victim_span)
         selected_passages = select_dual_domain_passages(
             passages,
             query,
             self._get_ranker(),
             top_n=self.passage_top_n,
             min_cosine=self.min_cosine,
+            include_legal=DOMAIN_LEGAL in search_domains,
+            include_clinical=True,
         )
         passages_used = [text for text, _score in selected_passages]
 
@@ -234,7 +250,8 @@ class KnowledgeTripletPipeline:
             min_cosine=self.min_cosine,
         )
         bank = counseling_candidates(entities, victim_span)
-        ranked = merge_turn_knowledge(ranked, bank, top_k=self.top_k)
+        ranked = merge_turn_knowledge(ranked, bank, top_k=max(self.top_k, 8))
+        ranked = assemble_reply_knowledge(ranked, top_k=self.top_k)
         verbalized = self._verbalize_candidates(ranked)
         return HybridRunResult(
             verbalized=verbalized,
@@ -245,6 +262,7 @@ class KnowledgeTripletPipeline:
             passages_used=passages_used,
             no_passages_used=not passages_used,
             counseling_bank_used=sum(1 for c in ranked if c.source == "counseling_bank"),
+            filtered_triplets=filtered,
         )
 
     def run_raw_knowledge(self, knowledge_text: str) -> List[str]:
@@ -257,24 +275,18 @@ class KnowledgeTripletPipeline:
             dialog_history,
             enable_live=enable_live,
         )
-        nlp = self._get_nlp()
         used_text = " ".join(hybrid.passages_used)
-        raw = extract_triplets(used_text, backend=self.openie_backend, nlp=nlp) if used_text else []
-        resolved = (
-            resolve_coreferences(raw, used_text, nlp=nlp, backend=self.coref_backend) if used_text else []
-        )
-        filtered = filter_triplets(resolved)
         return {
             "ranking_query": hybrid.ranking_query,
-            "passages_used": hybrid.passages_used,
-            "no_passages_used": hybrid.no_passages_used,
-            "cleaned_knowledge_preview": used_text[:500],
-            "raw_triplets": [t.to_dict() for t in raw],
-            "resolved_triplets": [t.to_dict() for t in resolved],
-            "filtered_triplets": [t.to_dict() for t in filtered],
-            "ranked_candidates": [c.to_dict() for c in hybrid.ranked_candidates],
-            "top1_similarity_score": hybrid.top1_similarity_score,
-            "live_retrieval_enabled": hybrid.live_enabled,
-            "counseling_bank_used": hybrid.counseling_bank_used,
+            "reply_knowledge": hybrid.verbalized,
             "verbalized": hybrid.verbalized,
+            "ranked_candidates": [c.to_dict() for c in hybrid.ranked_candidates],
+            "counseling_bank_used": hybrid.counseling_bank_used,
+            "live_retrieval_enabled": hybrid.live_enabled,
+            "top1_similarity_score": hybrid.top1_similarity_score,
+            "no_passages_used": hybrid.no_passages_used,
+            "passages_used_count": len(hybrid.passages_used),
+            "passages_used_preview": [text[:180] for text in hybrid.passages_used],
+            "filtered_triplet_count": len(hybrid.filtered_triplets),
+            "cleaned_knowledge_preview": used_text[:240],
         }
