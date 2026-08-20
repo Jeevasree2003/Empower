@@ -40,6 +40,12 @@ _NON_COUNSELOR_PROSE = re.compile(
     r"100\s*000 population|disability-adjusted",
     re.IGNORECASE,
 )
+_NAV_FOOTER = re.compile(
+    r"email us at|mon\s*[-–]\s*sat|tue\s*[-–]\s*sat|\bcopyright\b|all rights reserved|"
+    r"icall@tiss\.edu|subscribe|follow us|we mental health\s*&|"
+    r"psychosocial support.{0,20}icall",
+    re.IGNORECASE,
+)
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
 _QUERY_STOPWORDS = frozenset(
     {
@@ -84,7 +90,7 @@ def extractive_sentences(query: str, text: str, max_n: int = 3) -> List[str]:
         line = raw.strip()
         if len(line) < 40 or len(line) > 420:
             continue
-        if _is_broken_live_sentence(line) or _is_meta_commentary(line):
+        if _NAV_FOOTER.search(line) or _is_broken_live_sentence(line) or _is_meta_commentary(line):
             continue
         if _NON_COUNSELOR_PROSE.search(line):
             continue
@@ -119,6 +125,10 @@ class LiveKnowledgeSentence:
             "source_url": self.source_url,
             "query": self.query,
         }
+
+
+def is_scraped_boilerplate(text: str) -> bool:
+    return bool(_NAV_FOOTER.search(text or ""))
 
 
 def _is_broken_live_sentence(line: str) -> bool:
@@ -160,7 +170,7 @@ def _parse_sentences(raw: str) -> List[str]:
         line_norm = line.upper().replace(" ", "_")
         if line_norm == NO_RELEVANT_INFO or line_norm.startswith(f"{NO_RELEVANT_INFO}_"):
             continue
-        if _is_meta_commentary(line) or _is_broken_live_sentence(line):
+        if _is_meta_commentary(line) or _is_broken_live_sentence(line) or is_scraped_boilerplate(line):
             continue
         if _NON_COUNSELOR_PROSE.search(line):
             continue

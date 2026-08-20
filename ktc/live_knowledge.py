@@ -1,16 +1,20 @@
-"""Orchestrate live knowledge retrieval: entities → queries → search → summarize."""
+"""Orchestrate live knowledge retrieval: entities → queries → search → OpenIE."""
 
 from __future__ import annotations
 
 import logging
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
+from ktc.cleaning import clean_knowledge_text
+from ktc.coreference import resolve_coreferences
 from ktc.entity_extraction import extract_entities
+from ktc.extraction import extract_triplets
+from ktc.filtering import filter_triplets
 from ktc.knowledge_item import KnowledgeCandidate
 from ktc.live_config import ApiCallBudget, LiveRetrievalConfig
 from ktc.live_retrieval import search_allowlisted
-from ktc.live_summarize import LiveKnowledgeSentence, summarize_search_results
+from ktc.live_summarize import LiveKnowledgeSentence, is_scraped_boilerplate, summarize_search_results
 from ktc.query_builder import SearchQuery, build_queries
 
 logger = logging.getLogger(__name__)
@@ -77,17 +81,37 @@ def fetch_live_knowledge(
         )
         live_sentences = summarize_search_results(query.text, results, config, budget=budget)
         all_live_sentences.extend(live_sentences)
-        for item in live_sentences:
+        candidates.extend(_triplet_candidates_from_live(live_sentences, nlp=nlp))
+
+    return candidates, queries, all_live_sentences
+
+
+def _triplet_candidates_from_live(
+    sentences: List[LiveKnowledgeSentence],
+    nlp=None,
+) -> List[KnowledgeCandidate]:
+    """Stage 2a–2b on live excerpts so verbalization is triplet-based, not footer text."""
+    candidates: List[KnowledgeCandidate] = []
+    for item in sentences:
+        if is_scraped_boilerplate(item.sentence):
+            logger.info("live_skip_boilerplate url=%s", item.source_url)
+            continue
+        cleaned = clean_knowledge_text(item.sentence)
+        if not cleaned or is_scraped_boilerplate(cleaned):
+            continue
+        raw = extract_triplets(cleaned, backend="spacy", nlp=nlp)
+        resolved = resolve_coreferences(raw, cleaned, nlp=nlp, backend="heuristic")
+        for triplet in filter_triplets(resolved):
             candidates.append(
                 KnowledgeCandidate(
-                    text=item.sentence,
+                    text=triplet.as_text(),
                     source="live_api",
                     url=item.source_url,
                     query=item.query,
+                    triplet=triplet,
                 )
             )
-
-    return candidates, queries, all_live_sentences
+    return candidates
 
 
 def static_candidates_from_triplets(triplets) -> List[KnowledgeCandidate]:

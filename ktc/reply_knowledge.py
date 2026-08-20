@@ -7,6 +7,8 @@ from typing import Iterable, List
 
 from ktc.knowledge_item import KnowledgeCandidate
 
+from ktc.live_summarize import is_scraped_boilerplate
+
 _NOT_VICTIM_FACING = re.compile(
     r"policy makers|member states|daly|economic loss|primary health care level|"
     r"online legal india|complaint request|hello team|hi tejal|"
@@ -38,6 +40,22 @@ def is_victim_facing(text: str) -> bool:
     return not bool(_NOT_VICTIM_FACING.search(text))
 
 
+def is_ktc_usable(candidate: KnowledgeCandidate) -> bool:
+    """True for OpenIE/live triplets that can enter Stage 2e verbalization."""
+    if candidate.source == "counseling_bank":
+        return False
+    text = (candidate.text or "").strip()
+    if len(text) < 12:
+        return False
+    if is_scraped_boilerplate(text) or _NOT_VICTIM_FACING.search(text):
+        return False
+    if _ANECDOTE.search(text):
+        return False
+    if candidate.source == "live_api" and re.search(r"\[\.+\.\.\]|is not rape|^--", text, re.I):
+        return False
+    return True
+
+
 def is_reply_usable(candidate: KnowledgeCandidate) -> bool:
     """True when the sentence can be handed to a counselor as knowledge."""
     text = (candidate.text or "").strip()
@@ -45,6 +63,8 @@ def is_reply_usable(candidate: KnowledgeCandidate) -> bool:
         return False
     if candidate.source == "counseling_bank":
         return True
+    if is_scraped_boilerplate(text):
+        return False
     if candidate.source == "static_dataset":
         return bool(_GROUNDED_FACT.search(text) or _PHONE.search(text)) and not _ANECDOTE.search(text)
     if _ANECDOTE.search(text):

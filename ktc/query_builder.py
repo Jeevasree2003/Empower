@@ -648,17 +648,6 @@ def build_queries(
 
     unique.sort(key=lambda q: (_TEMPLATE_PRIORITY.get(q.template, 50), q.text.lower()))
     selected = unique[:max_queries]
-    if not selected and _lower(victim_text):
-        selected = _situation_queries(victim_text)[:max_queries]
-        if not selected:
-            selected = [
-                _sq(
-                    f"KIRAN mental health helpline 1800-599-0019 whom to contact India mohfw {CURRENT_YEAR}",
-                    "mental health distress",
-                    CATEGORY_MENTAL_HEALTH,
-                    "sit_help_seeking",
-                )
-            ]
     for q in selected:
         logger.info(
             "constructed_query situation=%s entity=%r category=%s template=%s query=%r",

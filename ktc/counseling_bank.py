@@ -1,10 +1,9 @@
-"""Grounded legal + clinical counseling sentences for live victim turns.
+"""Trigger-matched legal + clinical facts, kept out of Stage 2e verbalization.
 
-KARE knowledge blobs are often off-topic (yoga vs abandonment, romance-scam
-pages vs a homicide threat). OpenIE on that text cannot invent the missing
-domain. These items are short, India-facing counselor facts used when a victim
-has spoken, so verbalized knowledge covers both legal help-seeking and
-clinical safety.
+KARE blobs are often off-topic, so OpenIE cannot invent missing helpline or
+statute text. These sentences are optional supplemental counseling — they fire
+only when a trigger token appears in the victim utterance, never as a global
+always-on dump mixed into verbalized KTC.
 """
 
 from __future__ import annotations
@@ -33,7 +32,6 @@ class CounselingFact:
     emergency: bool = False
 
 
-_ALWAYS = frozenset({"*"})
 _CRISIS = frozenset(
     {
         "dying",
@@ -92,24 +90,24 @@ def _facts() -> List[CounselingFact]:
         CounselingFact(
             DOMAIN_CLINICAL,
             "KIRAN, the national mental health helpline 1800-599-0019, offers 24x7 distress support in India.",
-            _CRISIS | _ALWAYS,
+            _CRISIS,
             "https://www.mohfw.gov.in/",
         ),
         CounselingFact(
             DOMAIN_CLINICAL,
             "iCall psychosocial helpline 9152987821 provides confidential counseling for people in emotional distress.",
-            _CRISIS | _ALWAYS,
+            _CRISIS,
             "https://icallhelpline.org/",
         ),
         CounselingFact(
             DOMAIN_CLINICAL,
             "You can ask for help even if you are not sure what the problem is called; a counselor can listen first.",
-            _CRISIS | _ALWAYS,
+            _CRISIS,
         ),
         CounselingFact(
             DOMAIN_CLINICAL,
             "If you do not know which office to visit, a helpline can tell you the next safe step without requiring a diagnosis.",
-            _CRISIS | _ALWAYS,
+            _CRISIS,
         ),
         CounselingFact(
             DOMAIN_CLINICAL,
@@ -121,7 +119,7 @@ def _facts() -> List[CounselingFact]:
         CounselingFact(
             DOMAIN_CLINICAL,
             "You do not have to face this alone; speaking with a trusted person or counselor can reduce isolation during a crisis.",
-            _CRISIS | _ALWAYS,
+            _CRISIS,
         ),
         CounselingFact(
             DOMAIN_CLINICAL,
@@ -189,7 +187,7 @@ def _facts() -> List[CounselingFact]:
         CounselingFact(
             DOMAIN_LEGAL,
             "You do not have to file a police case before getting emotional support; 181 or NALSA legal aid can help if you later need legal information or protection.",
-            _CRISIS | _ALWAYS,
+            _CRISIS,
             "https://nalsa.gov.in/",
         ),
         CounselingFact(
@@ -234,7 +232,7 @@ def _trigger_keys(entities: Sequence[Dict[str, str]], victim_text: str) -> Set[s
         "torture",
         "frustrated",
     ):
-        if token in lower:
+        if re.search(r"\b" + re.escape(token) + r"\b", lower):
             keys.add(token)
     if "missing" in lower or "not returned" in lower:
         keys.add("missing person")
@@ -272,23 +270,8 @@ def content_need_domains(entities: Sequence[Dict[str, str]], victim_text: str) -
 
 
 def victim_needs_domains(entities: Sequence[Dict[str, str]], victim_text: str) -> Set[str]:
-    """Clinical for any victim turn; legal only when the words show a legal need."""
-    domains = content_need_domains(entities, victim_text)
-    if victim_text.strip():
-        domains.add(DOMAIN_CLINICAL)
-        keys = _trigger_keys(entities, victim_text)
-        if keys & (
-            _VIOLENCE
-            | _PROCEDURE
-            | _FAMILY_LAW
-            | _MISSING
-            | _CYBER
-            | _WORKPLACE
-            | _DEBT
-            | _CRISIS
-        ):
-            domains.add(DOMAIN_LEGAL)
-    return domains
+    """Only domains evidenced in the victim text — no blanket clinical/legal fill."""
+    return content_need_domains(entities, victim_text)
 
 
 def counseling_candidates(
@@ -322,7 +305,7 @@ def counseling_candidates(
     for fact in _facts():
         if fact.domain not in needed:
             continue
-        specific = fact.triggers - _ALWAYS
+        specific = fact.triggers
         if fact.emergency and specific and keys & specific:
             try_add(fact)
 
@@ -333,18 +316,7 @@ def counseling_candidates(
         for fact in _facts():
             if fact.domain != domain or fact.emergency:
                 continue
-            specific = fact.triggers - _ALWAYS
-            if specific and keys & specific:
-                if try_add(fact):
-                    taken += 1
-                if taken >= per_domain:
-                    break
-        if taken < per_domain:
-            for fact in _facts():
-                if fact.domain != domain:
-                    continue
-                if "*" not in fact.triggers:
-                    continue
+            if fact.triggers and keys & fact.triggers:
                 if try_add(fact):
                     taken += 1
                 if taken >= per_domain:
@@ -357,7 +329,7 @@ def merge_turn_knowledge(
     bank: Sequence[KnowledgeCandidate],
     top_k: int = 8,
 ) -> List[KnowledgeCandidate]:
-    """Guarantee legal+clinical bank facts, then fill with gated ranked items."""
+    """Keep ranked KTC items first; bank is optional and must not replace them."""
     merged: List[KnowledgeCandidate] = []
     seen: Set[str] = set()
 
@@ -368,11 +340,11 @@ def merge_turn_knowledge(
         seen.add(key)
         merged.append(candidate)
 
-    for item in bank:
+    for item in ranked:
         add(item)
         if len(merged) >= top_k:
             return merged[:top_k]
-    for item in ranked:
+    for item in bank:
         add(item)
         if len(merged) >= top_k:
             break

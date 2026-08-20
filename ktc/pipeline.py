@@ -13,7 +13,6 @@ from ktc.counseling_bank import (
     DOMAIN_LEGAL,
     content_need_domains,
     counseling_candidates,
-    merge_turn_knowledge,
 )
 from ktc.entity_extraction import extract_entities
 from ktc.extraction import extract_triplets
@@ -35,7 +34,7 @@ from ktc.ranking import (
     rank_candidates,
     ranking_query_from_history,
 )
-from ktc.reply_knowledge import assemble_reply_knowledge, is_reply_usable
+from ktc.reply_knowledge import is_ktc_usable, is_reply_usable
 from ktc.triplet import Triplet
 from ktc.verbalization import verbalize_triplets
 
@@ -64,6 +63,7 @@ class HybridRunResult:
     static_verbalized: List[str] = field(default_factory=list)
     live_verbalized: List[str] = field(default_factory=list)
     victim_span: str = ""
+    supplemental_counseling: List[KnowledgeCandidate] = field(default_factory=list)
 
 
 @dataclass
@@ -149,7 +149,7 @@ class KnowledgeTripletPipeline:
         static_indices: List[int] = []
 
         for i, candidate in enumerate(ranked):
-            if candidate.source == "static_dataset" and candidate.triplet is not None:
+            if candidate.triplet is not None:
                 static_indices.append(i)
                 static_triplets.append(candidate.triplet)
             else:
@@ -260,9 +260,8 @@ class KnowledgeTripletPipeline:
             ranker=self._get_ranker(),
             min_cosine=self.min_cosine,
         )
-        bank = counseling_candidates(entities, victim_span)
-        ranked = merge_turn_knowledge(ranked, bank, top_k=max(self.top_k, 10))
-        ranked = assemble_reply_knowledge(ranked, top_k=max(self.top_k, 10))
+        ranked = [c for c in ranked if is_ktc_usable(c)]
+        supplemental = counseling_candidates(entities, victim_span)
         verbalized = self._verbalize_candidates(ranked)
         static_verbalized = []
         if filtered:
@@ -276,7 +275,9 @@ class KnowledgeTripletPipeline:
                 if is_reply_usable(probe):
                     static_verbalized.append(sentence)
         live_verbalized = [
-            c.text for c in ranked if c.source == "live_api"
+            sentence
+            for candidate, sentence in zip(ranked, verbalized)
+            if candidate.source == "live_api"
         ]
         return HybridRunResult(
             verbalized=verbalized,
@@ -286,7 +287,7 @@ class KnowledgeTripletPipeline:
             ranking_query=query,
             passages_used=passages_used,
             no_passages_used=not passages_used,
-            counseling_bank_used=sum(1 for c in ranked if c.source == "counseling_bank"),
+            counseling_bank_used=len(supplemental),
             filtered_triplets=filtered,
             constructed_queries=constructed,
             entities=entities,
@@ -294,6 +295,7 @@ class KnowledgeTripletPipeline:
             static_verbalized=static_verbalized,
             live_verbalized=live_verbalized,
             victim_span=victim_span,
+            supplemental_counseling=supplemental,
         )
 
     def run_raw_knowledge(self, knowledge_text: str) -> List[str]:
@@ -307,19 +309,12 @@ class KnowledgeTripletPipeline:
             enable_live=enable_live,
         )
         used_text = " ".join(hybrid.passages_used)
-        module_knowledge = []
-        seen = set()
-        for sentence in hybrid.verbalized + hybrid.live_verbalized + hybrid.static_verbalized:
-            key = sentence.strip().lower()
-            if not key or key in seen:
-                continue
-            seen.add(key)
-            module_knowledge.append(sentence.strip())
+        module_knowledge = list(hybrid.verbalized)
         return {
             "query_field_note": (
-                "ranked_candidates[].query is the live Tavily search string. "
-                "counseling_bank items use query='counseling_bank' because they are local facts, not search hits. "
-                "See constructed_queries for searches that run with --enable-live."
+                "verbalized is Stage 2e over OpenIE triplets from gated KARE passages and live pages. "
+                "supplemental_counseling is trigger-matched local facts and is not mixed into verbalized. "
+                "Live ranked_candidates[].query is the Tavily search string; it is null/absent on static triplets."
             ),
             "victim_span": hybrid.victim_span,
             "entities": hybrid.entities,
@@ -337,6 +332,7 @@ class KnowledgeTripletPipeline:
                 "verbalized": hybrid.live_verbalized,
             },
             "counseling_bank_used": hybrid.counseling_bank_used,
+            "supplemental_counseling": [c.to_dict() for c in hybrid.supplemental_counseling],
             "reply_knowledge": hybrid.verbalized,
             "verbalized": hybrid.verbalized,
             "module_knowledge": module_knowledge,

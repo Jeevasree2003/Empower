@@ -92,32 +92,32 @@ def print_demo(dialogue: dict, history: str, result: dict, turn: int) -> None:
     for sentence in static.get("verbalized") or []:
         print(f"  - {sentence}")
 
-    _print_stage("STAGE 2  Live / hybrid retrieval")
+    _print_stage("STAGE 2  Live retrieval → OpenIE triplets → verbalize")
     live = result.get("live_knowledge") or {}
     print(f"live_enabled: {live.get('enabled')}")
     live_sents = live.get("verbalized") or []
     if not live.get("enabled"):
         print("  live off (default). Re-run with --enable-live to fetch allowlisted pages.")
     elif not live_sents:
-        print("  live on, but no counselor-usable sentences survived the snippet filter.")
+        print("  live on, but no OpenIE triplets survived filtering (nav/footer dropped).")
     for sentence in live_sents:
         print(f"  - {sentence}")
 
-    _print_stage("STAGE 3  Counseling bank (local India facts, not a search hit)")
-    print(f"counseling_bank_used: {result.get('counseling_bank_used')}")
-    for cand in result.get("ranked_candidates") or []:
-        if cand.get("source") != "counseling_bank":
-            continue
-        print(f"  [{cand.get('domain')}] query={cand.get('query')!r}")
-        print(f"    {cand.get('text')}")
+    _print_stage("STAGE 3  Supplemental counseling facts (NOT Stage 2e; trigger-matched only)")
+    extra = result.get("supplemental_counseling") or []
+    print(f"count: {len(extra)}")
+    if not extra:
+        print("  (none — no crisis/crime triggers in this utterance)")
+    for cand in extra:
+        print(f"  [{cand.get('domain')}] {cand.get('text')}")
 
-    _print_stage("STAGE 4  Reply knowledge for the next module")
-    print("reply_knowledge (counselor-safe mix of bank + live + grounded static):")
-    for sentence in result.get("reply_knowledge") or []:
-        print(f"  - {sentence}")
-    print()
-    print("module_knowledge (deduped bank + live + static verbalized):")
-    for sentence in result.get("module_knowledge") or []:
+    _print_stage("STAGE 4  verbalized = Stage 2e KTC only")
+    print(result.get("query_field_note"))
+    print("verbalized:")
+    sents = result.get("verbalized") or []
+    if not sents:
+        print("  (empty — no gated KARE/live triplets for this turn)")
+    for sentence in sents:
         print(f"  - {sentence}")
 
 

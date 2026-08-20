@@ -74,6 +74,10 @@ _BOILERPLATE_FRAGMENTS = (
     "received your complaint request",
     "consumer complaint against mental harassment",
     "appreciate your efforts in reaching out",
+    "email us at",
+    "icall@tiss.edu",
+    "mon - sat",
+    "all rights reserved",
 )
 
 _MAX_TAIL_WORDS = 12
