@@ -137,6 +137,18 @@ def _find_source_sentence(triplet: Triplet, sent_docs: Sequence) -> Optional[obj
     return best_doc if best_overlap > 0 else None
 
 
+_ORG_LIKE = frozenset({"ORG", "GPE", "NORP", "FAC", "LOC"})
+
+
+def _is_person_chunk(chunk) -> bool:
+    if getattr(getattr(chunk, "root", None), "ent_type_", "") == "PERSON":
+        return True
+    try:
+        return any(getattr(t, "ent_type_", "") == "PERSON" for t in chunk)
+    except TypeError:
+        return False
+
+
 def _chunk_compatible(chunk, pronoun_class: str) -> bool:
     text_lower = chunk.text.lower()
     tokens = set(re.findall(r"[a-z']+", text_lower))
@@ -144,16 +156,16 @@ def _chunk_compatible(chunk, pronoun_class: str) -> bool:
     if pronoun_class == "masc":
         if tokens & _FEMININE_HINTS:
             return False
-        if chunk.root.ent_type_ == "PERSON":
-            return True
-        return chunk.root.pos_ in {"NOUN", "PROPN"}
+        if getattr(chunk.root, "ent_type_", "") in _ORG_LIKE:
+            return False
+        return _is_person_chunk(chunk)
 
     if pronoun_class == "fem":
         if tokens & _MASCULINE_HINTS:
             return False
-        if chunk.root.ent_type_ == "PERSON":
-            return True
-        return chunk.root.pos_ in {"NOUN", "PROPN"}
+        if getattr(chunk.root, "ent_type_", "") in _ORG_LIKE:
+            return False
+        return _is_person_chunk(chunk)
 
     if pronoun_class == "plural":
         if chunk.root.morph.get("Number") == ["Plur"]:
@@ -199,13 +211,10 @@ def _pick_from_compatible(compatible: List, pronoun_class: str) -> Optional[str]
         person_chunks = [
             c
             for c in reversed(compatible)
-            if not _is_pronoun_chunk(c)
-            and (c.root.ent_type_ == "PERSON" or c.root.pos_ == "PROPN")
+            if not _is_pronoun_chunk(c) and _is_person_chunk(c)
         ]
         if person_chunks:
             return person_chunks[0].text.strip()
-        if len(compatible) == 1 and not _is_pronoun_chunk(compatible[0]):
-            return compatible[0].text.strip()
         return None
     return compatible[-1].text.strip()
 
@@ -239,10 +248,8 @@ def _pick_antecedent(
             for chunk in reversed(compatible):
                 if _is_pronoun_chunk(chunk):
                     continue
-                if chunk.root.ent_type_ == "PERSON" or chunk.root.pos_ == "PROPN":
+                if _is_person_chunk(chunk):
                     return chunk.text.strip()
-            if len(compatible) == 1 and not _is_pronoun_chunk(compatible[0]):
-                return compatible[0].text.strip()
             continue
         return compatible[-1].text.strip()
     return None

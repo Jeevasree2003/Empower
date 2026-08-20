@@ -138,6 +138,17 @@ def _content_tokens(text: str) -> List[str]:
     return [w for w in re.findall(r"[a-z0-9]+", (text or "").lower()) if w not in {"a", "an", "the"}]
 
 
+def _is_garbage_span(text: str) -> bool:
+    """Reject citation/HTML leftovers such as ``C9`` or ``>``."""
+    tokens = [t for t in re.split(r"\s+", (text or "").strip()) if t]
+    if len(tokens) != 1:
+        return False
+    tok = tokens[0].strip("()[]{}<>.,;:\"'`")
+    if len(tok) < 2:
+        return True
+    return not tok.isalpha()
+
+
 def _near_duplicate_head_tail(head: str, tail: str) -> bool:
     h = _content_tokens(head)
     t = _content_tokens(tail)
@@ -152,6 +163,8 @@ def _near_duplicate_head_tail(head: str, tail: str) -> bool:
 
 
 def passes_filters(triplet: Triplet) -> bool:
+    if _is_garbage_span(triplet.head) or _is_garbage_span(triplet.tail):
+        return False
     if triplet.tail.strip().lower() == triplet.head.strip().lower():
         return False
     if _near_duplicate_head_tail(triplet.head, triplet.tail):

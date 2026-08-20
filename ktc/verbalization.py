@@ -110,6 +110,24 @@ def _make_llm_client(llm_config=None):
     return OpenAI(**kwargs), config
 
 
+_MAX_LLM_SPAN_WORDS = 15
+
+
+def _truncate_span(text: str, max_words: int = _MAX_LLM_SPAN_WORDS) -> str:
+    words = (text or "").split()
+    if len(words) <= max_words:
+        return text
+    return " ".join(words[:max_words])
+
+
+def _compact_triplet(triplet: Triplet) -> Triplet:
+    return Triplet(
+        head=_truncate_span(triplet.head),
+        relation=triplet.relation,
+        tail=_truncate_span(triplet.tail),
+    )
+
+
 def verbalize_llm(
     triplets: Iterable[Triplet],
     model: Optional[str] = None,
@@ -147,10 +165,11 @@ def verbalize_llm(
         f"{_LLM_FEW_SHOT_EXAMPLES}"
     )
     for triplet in triplet_list:
+        compact = _compact_triplet(triplet)
         user_prompt = (
-            f"Head: {triplet.head}\n"
-            f"Relation: {triplet.relation}\n"
-            f"Tail: {triplet.tail}\n"
+            f"Head: {compact.head}\n"
+            f"Relation: {compact.relation}\n"
+            f"Tail: {compact.tail}\n"
             "Sentence:"
         )
         try:
@@ -163,17 +182,29 @@ def verbalize_llm(
                 temperature=0.2,
                 max_tokens=80,
             )
-            sentences.append(_sanitize_llm_sentence(response.choices[0].message.content or ""))
+            choice = response.choices[0]
+            content = (choice.message.content or "").strip()
+            finish = getattr(choice, "finish_reason", None) or ""
+            if not content or finish == "length":
+                logger.warning(
+                    "LLM verbalization incomplete head_words=%d tail_words=%d finish_reason=%s; using truncated template",
+                    len(triplet.head.split()),
+                    len(triplet.tail.split()),
+                    finish or "empty",
+                )
+                sentences.append(verbalize_template(compact))
+                continue
+            sentences.append(_sanitize_llm_sentence(content))
         except Exception as exc:
             if fallback_to_template:
                 logger.warning(
-                    "LLM verbalization failed for triplet (%r, %r, %r): %s; using template",
-                    triplet.head,
-                    triplet.relation,
-                    triplet.tail,
+                    "LLM verbalization failed for triplet (%r, %r, %r): %s; using truncated template",
+                    compact.head,
+                    compact.relation,
+                    compact.tail,
                     exc,
                 )
-                sentences.append(verbalize_template(triplet))
+                sentences.append(verbalize_template(compact))
             else:
                 raise
     return sentences
@@ -205,4 +236,4 @@ def verbalize_triplets(triplets: Iterable[Triplet], backend: str = "llm", **kwar
         )
     else:
         raise ValueError(f"Unsupported verbalization backend: {backend}")
-    return [s for s, t in zip(raw, triplet_list) if sentence_preserves_triplet(s, t)]
+    return [s for s, t in zip(raw, triplet_list) if sentence_preserves_triplet(s, _compact_triplet(t))]

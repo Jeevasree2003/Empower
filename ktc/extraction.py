@@ -9,11 +9,19 @@ from ktc.triplet import Triplet
 
 
 def _sentences(text: str) -> List[str]:
+    from ktc.cleaning import _split_overlong_sentence
+
     text = re.sub(r"\s+", " ", text.strip())
     if not text:
         return []
     parts = re.split(r"(?<=[.!?])\s+", text)
-    return [p.strip() for p in parts if p.strip()]
+    sentences: List[str] = []
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+        sentences.extend(_split_overlong_sentence(part) if len(part) > 220 else [part])
+    return [p.strip() for p in sentences if p.strip()]
 
 
 def _relation_span(token) -> str:
@@ -31,8 +39,23 @@ def _relation_span(token) -> str:
     return " ".join(t.text for t in span).strip()
 
 
+_MAX_SPAN_TOKENS = 10
+_CLAUSAL_DEPS = frozenset({"relcl", "advcl", "ccomp", "acl", "xcomp"})
+
+
 def _span_text(token) -> str:
-    return " ".join(t.text for t in token.subtree).strip()
+    drop = set()
+    for child in token.children:
+        if child.dep_ in _CLAUSAL_DEPS:
+            drop.update(t.i for t in child.subtree)
+    tokens = [t for t in token.subtree if t.i not in drop]
+    if len(tokens) > _MAX_SPAN_TOKENS:
+        tokens = tokens[:_MAX_SPAN_TOKENS]
+    text = " ".join(t.text for t in tokens).strip()
+    words = text.split()
+    if len(words) > _MAX_SPAN_TOKENS:
+        text = " ".join(words[:_MAX_SPAN_TOKENS])
+    return text
 
 
 def _np_core_span(token) -> str:
@@ -43,9 +66,13 @@ def _np_core_span(token) -> str:
     """
     drop = set()
     for child in token.children:
-        if child.dep_ == "prep":
+        if child.dep_ == "prep" or child.dep_ in _CLAUSAL_DEPS:
             drop.update(t.i for t in child.subtree)
-    return " ".join(t.text for t in token.subtree if t.i not in drop).strip()
+    text = " ".join(t.text for t in token.subtree if t.i not in drop).strip()
+    words = text.split()
+    if len(words) > _MAX_SPAN_TOKENS:
+        text = " ".join(words[:_MAX_SPAN_TOKENS])
+    return text
 
 
 def _noun_prep_pobjs(token) -> List[tuple]:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from typing import List
 
 MONTHS = (
     "January|February|March|April|May|June|July|August|"
@@ -46,6 +47,19 @@ def clean_knowledge_text(text: str) -> str:
     text = re.sub(r"([.:;,!?])([A-Za-z])", r"\1 \2", text)
     # Lowercase glued to uppercase within a token (e.g. meNyaaya, religionNyaaya)
     text = re.sub(r"([a-z])([A-Z])", r"\1 \2", text)
+    # Glued discourse: "placeshere is a list"
+    text = re.sub(
+        r"([a-z])((?:here is|the biggest reason|the guide |reviews assessments|first[, ]))",
+        r"\1. \2",
+        text,
+        flags=re.IGNORECASE,
+    )
+    # HTML / footnote leftovers that become fake tails (C9, <, >)
+    text = re.sub(r"<[^>\s]*>", " ", text)
+    text = re.sub(r"\[[^\]]*\]", " ", text)
+    text = re.sub(r"[<>]", " ", text)
+    text = re.sub(r"\bC\d+\b", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
 
     lowered = text.lower()
     for phrase in _BOILERPLATE:
@@ -63,6 +77,31 @@ def clean_knowledge_text(text: str) -> str:
         for sent in re.split(r"(?<=[.!?])\s+", chunk):
             sent = sent.strip()
             if len(sent) > 20:
-                sentences.append(sent)
+                sentences.extend(_split_overlong_sentence(sent))
 
     return " ".join(sentences)
+
+
+_MAX_SENT_CHARS = 220
+_CLAUSE_SPLIT = re.compile(r"(?<=[;:])\s+|(?<=,)\s+(?=(?:the|a|an|this|that|first|here)\b)", re.I)
+
+
+def _split_overlong_sentence(sent: str) -> List[str]:
+    """Break unpunctuated scraped run-ons so spaCy does not parse one giant clause."""
+    if len(sent) <= _MAX_SENT_CHARS:
+        return [sent]
+    pieces = [p.strip() for p in _CLAUSE_SPLIT.split(sent) if p.strip()]
+    if len(pieces) == 1:
+        words = sent.split()
+        pieces = []
+        buf: List[str] = []
+        size = 0
+        for word in words:
+            buf.append(word)
+            size += len(word) + 1
+            if size >= _MAX_SENT_CHARS:
+                pieces.append(" ".join(buf))
+                buf, size = [], 0
+        if buf:
+            pieces.append(" ".join(buf))
+    return [p if p.endswith((".", "!", "?")) else p + "." for p in pieces if len(p) > 8]

@@ -107,19 +107,70 @@ _MEDIUM_TERMS = (
 _SECTION_RE = re.compile(r"\bsection\s+(\d+[A-Za-z]?)\b", re.IGNORECASE)
 _IT_ACT_SECTION_RE = re.compile(r"\b(?:sec(?:tion)?\.?\s*)?66[A-Za-z]?\b", re.IGNORECASE)
 
+# Map inflected/colloquial lemmas onto lexicon terms (spaCy: complain != complaint).
+_LEMMA_FAMILIES: Dict[str, str] = {
+    "complain": "complaint",
+    "complains": "complaint",
+    "complained": "complaint",
+    "complaining": "complaint",
+    "complaint": "complaint",
+    "complaints": "complaint",
+    "harass": "harassment",
+    "harasses": "harassment",
+    "harassed": "harassment",
+    "harassing": "harassment",
+    "harassment": "harassment",
+    "threaten": "threat",
+    "threatens": "threat",
+    "threatened": "threat",
+    "threatening": "threat",
+    "threat": "threat",
+    "threats": "threat",
+    "stalk": "stalking",
+    "stalks": "stalking",
+    "stalked": "stalking",
+    "report": "report",
+    "reports": "report",
+    "reported": "report",
+    "reporting": "report",
+}
+
 
 def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", text.strip().lower())
 
 
-def _find_lexicon_matches(text: str, terms: tuple[str, ...]) -> List[str]:
-    lower = _normalize(text)
+def _canonical_lemma(token) -> str:
+    lemma = (token.lemma_ or token.text or "").lower()
+    surface = (token.text or "").lower()
+    return _LEMMA_FAMILIES.get(lemma, _LEMMA_FAMILIES.get(surface, lemma))
+
+
+def _canonical_stream(doc) -> str:
+    parts = [_canonical_lemma(t) for t in doc if not t.is_space and not t.is_punct]
+    return " " + " ".join(parts) + " "
+
+
+def _term_canonical(term: str, nlp) -> str:
+    doc = nlp(term)
+    parts = [_canonical_lemma(t) for t in doc if not t.is_space and not t.is_punct]
+    return " ".join(parts)
+
+
+def _find_lexicon_matches(text: str, terms: tuple[str, ...], nlp) -> List[str]:
+    """Match lexicon terms on canonical lemmas, not raw substrings."""
+    doc = nlp(text)
+    haystack = _canonical_stream(doc)
+    surface = " " + _normalize(text) + " "
     found: List[str] = []
     for term in sorted(terms, key=len, reverse=True):
-        if term in lower and term not in found:
-            # avoid duplicate substrings
-            if not any(term in existing for existing in found):
-                found.append(term)
+        needle = " " + _term_canonical(term, nlp) + " "
+        surface_needle = " " + term.lower() + " "
+        if needle not in haystack and surface_needle not in surface:
+            continue
+        if any(term in existing or existing in term for existing in found):
+            continue
+        found.append(term)
     return found
 
 
@@ -155,23 +206,27 @@ def extract_entities(victim_utterance: str, nlp=None) -> List[Dict[str, str]]:
         seen.add(key)
         entities.append({"text": text.strip(), "category": category})
 
-    for term in _find_lexicon_matches(victim_utterance, _CRIME_TERMS):
+    for term in _find_lexicon_matches(victim_utterance, _CRIME_TERMS, nlp):
         add(term, CATEGORY_CRIME)
 
-    for term in _find_lexicon_matches(victim_utterance, _MENTAL_HEALTH_TERMS):
+    for term in _find_lexicon_matches(victim_utterance, _MENTAL_HEALTH_TERMS, nlp):
         add(term, CATEGORY_MENTAL_HEALTH)
 
-    for term in _find_lexicon_matches(victim_utterance, _LEGAL_TERMS):
+    for term in _find_lexicon_matches(victim_utterance, _LEGAL_TERMS, nlp):
         add(term, CATEGORY_LEGAL)
 
-    for term in _find_lexicon_matches(victim_utterance, _MEDIUM_TERMS):
+    for term in _find_lexicon_matches(victim_utterance, _MEDIUM_TERMS, nlp):
         add(term, CATEGORY_MEDIUM)
 
     # Composite patterns for domestic-threat utterances (e.g. "husband ... kill me")
     lower = _normalize(victim_utterance)
+    canon = _canonical_stream(nlp(victim_utterance))
     if "husband" in lower or "wife" in lower:
         if any(v in lower for v in ("kill", "murder", "beat", "abuse", "threat")):
             add("domestic violence", CATEGORY_CRIME)
+
+    if " police " in f" {lower} " and (" complaint " in canon or " report " in canon or " fir " in canon):
+        add("complaint", CATEGORY_LEGAL)
 
     if re.search(r"\blife\s+is\s+in\s+risk\b", lower) or re.search(
         r"\blife\s+(?:at|in)\s+risk\b", lower

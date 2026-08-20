@@ -37,7 +37,8 @@ _CANONICAL_QUERY_PHRASES: Dict[str, str] = {
     "threat": "criminal intimidation",
     "threat to life": "threat to life and domestic violence",
     "life in risk": "threat to life and domestic violence",
-    "abuse": "domestic abuse or violence",
+    "complain": "police complaint",
+    "complaint": "police complaint",
 }
 
 # IPC section numbers for indiacode retrieval (see PIPELINE.md — operative law is BNS
@@ -51,7 +52,9 @@ _CRIME_IPC_SECTION: Dict[str, str] = {
 }
 
 # Legal entities that mean "lodge/FIR" procedure, not abstract definitions.
-_FIR_PROCEDURE_ENTITIES = frozenset({"complaint", "complaints", "fir", "police complaint"})
+_FIR_PROCEDURE_ENTITIES = frozenset(
+    {"complaint", "complaints", "complain", "fir", "police complaint"}
+)
 
 # Template rank decides budget truncation. Crisis helpline is life-safety and
 # must never be crowded out; crime/legal still outrank generic MH/medium queries.

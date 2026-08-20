@@ -157,7 +157,20 @@ class TestExtraction(unittest.TestCase):
             msg=f"expected lodge-at + police station, got {[(t.relation, t.tail) for t in triplets]}",
         )
 
-    def test_skips_unmeaningful_prep_when_direct_object_exists(self):
+    def test_runon_knowledge_does_not_keep_clause_heads(self):
+        from ktc.cleaning import clean_knowledge_text
+
+        raw = (
+            "the biggest reason why stalking or any other form of sexual harassment is underreported "
+            "is the social attitude to it the guide emphasises on reporting the incident and registering "
+            "an official complaint on the national cyber crime reporting portal or to the police if the "
+            "behaviour of the cyberstalker is illegal or"
+        )
+        cleaned = clean_knowledge_text(raw)
+        triplets = self._extract(cleaned)
+        for t in triplets:
+            self.assertLessEqual(len(t.head.split()), 10, msg=repr(t))
+            self.assertLessEqual(len(t.tail.split()), 10, msg=repr(t))
         triplets = self._extract(
             "A more mature senior can arrange a face to face meeting with your harasser."
         )
@@ -205,7 +218,9 @@ class TestFiltering(unittest.TestCase):
         triplet = Triplet("police station", "to the", "complaint desk")
         self.assertFalse(passes_filters(triplet))
 
-    def test_rejects_bare_prep_copula(self):
+    def test_rejects_garbage_citation_tails(self):
+        self.assertFalse(passes_filters(Triplet("many stalkers", "may send without", "C9")))
+        self.assertFalse(passes_filters(Triplet("many stalkers", "may send without", ">")))
         self.assertFalse(passes_filters(Triplet("Singh", "was of", "an elaborate scam")))
         self.assertFalse(passes_filters(Triplet("the investigation", "is to", "your notice")))
 
@@ -322,7 +337,15 @@ class TestCoreference(unittest.TestCase):
         resolved = resolve_coreferences(raw, knowledge, nlp=self.nlp)
         self.assertEqual(resolved[0].head, "She")
 
-    def test_they_does_not_resolve_to_law(self):
+    def test_he_does_not_resolve_to_org_ncw(self):
+        knowledge = (
+            "The woman can report to the National Commission for Women (NCW). "
+            "He found out on his own."
+        )
+        raw = [Triplet("he", "found out on", "his own")]
+        resolved = self._resolve(knowledge, raw)
+        self.assertEqual(resolved[0].head.lower(), "he")
+        self.assertNotIn("ncw", resolved[0].head.lower())
         knowledge = "The law is strict. They called me at 9 pm without reason."
         raw = [Triplet("they", "called", "me")]
         resolved = self._resolve(knowledge, raw)
@@ -374,9 +397,9 @@ class TestCoreference(unittest.TestCase):
         knowledge = "The portal and Maria are available. He filed a complaint."
         raw = [Triplet("He", "filed", "a complaint")]
         resolved = self._resolve(knowledge, raw)
-        # Should resolve to Maria (PERSON), not "the portal".
-        self.assertIn("Maria", resolved[0].head)
+        # Masculine pronoun must not attach to an org or a feminine name.
         self.assertNotIn("portal", resolved[0].head.lower())
+        self.assertNotEqual(resolved[0].head.lower(), "maria")
 
     def test_no_antecedent_left_unsubstituted(self):
         knowledge = "It is important to file complaints quickly."
@@ -772,6 +795,14 @@ class TestEntityExtraction(unittest.TestCase):
         self.assertIn("stalking", texts)
         self.assertIn("instagram", texts)
 
+    def test_complain_lemmatizes_to_complaint(self):
+        entities = extract_entities("Is it possible to make police complain in this matter?")
+        texts = {e["text"].lower() for e in entities}
+        self.assertIn("complaint", texts)
+        queries = build_queries(entities, max_queries=4)
+        self.assertTrue(queries)
+        self.assertTrue(any(q.template == "legal_fir_procedure" for q in queries), [q.template for q in queries])
+
     def test_queries_are_specific(self):
         entities = [{"text": "stalking", "category": CATEGORY_CRIME}]
         queries = build_queries(entities, max_queries=2)
@@ -956,6 +987,22 @@ class TestRelevanceOverhaul(unittest.TestCase):
         gated = apply_score_gate(candidates, scores, min_score=0.38, max_k=3)
         self.assertEqual([c.text for c in gated.candidates], ["item-1", "item-2", "item-4"])
         self.assertEqual(gated.top1_score, 0.40)
+
+    def test_dedupe_near_identical_candidates(self):
+        from ktc.ranking import dedupe_knowledge_candidates
+
+        a = KnowledgeCandidate(
+            text="first a written complaint should be filed",
+            source="static_dataset",
+            triplet=Triplet("first a written complaint", "should be filed", "at the police station"),
+        )
+        b = KnowledgeCandidate(
+            text="first a written complaint should be filed at the nearest police station the guide emphasises",
+            source="static_dataset",
+            triplet=Triplet("first a written complaint", "should be filed", "at the nearest police station the guide emphasises"),
+        )
+        kept = dedupe_knowledge_candidates([a, b])
+        self.assertEqual(len(kept), 1)
 
     def test_greeting_only_returns_no_static_knowledge(self):
         from ktc.pipeline import KnowledgeTripletPipeline

@@ -2,13 +2,64 @@
 
 from __future__ import annotations
 
+import logging
+import os
+import re
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from typing import Iterable, List, Optional, Protocol, Tuple, runtime_checkable
 
 import numpy as np
 
 from ktc.knowledge_item import KnowledgeCandidate
 from ktc.triplet import Triplet
+
+logger = logging.getLogger(__name__)
+
+
+def _configure_hf_token() -> None:
+    """Use HF_TOKEN from the environment/.env so SBERT downloads are authenticated."""
+    token = (os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or "").strip()
+    if token:
+        os.environ.setdefault("HUGGINGFACE_HUB_TOKEN", token)
+        return
+    try:
+        from dotenv import load_dotenv
+        from pathlib import Path
+
+        load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+    except Exception:
+        pass
+    token = (os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or "").strip()
+    if token:
+        os.environ.setdefault("HUGGINGFACE_HUB_TOKEN", token)
+    else:
+        logger.info("HF_TOKEN not set; Sentence-BERT will use anonymous Hugging Face downloads")
+
+
+def _content_key(text: str) -> tuple:
+    return tuple(w for w in re.findall(r"[a-z0-9]+", (text or "").lower()) if w not in {"a", "an", "the"})
+
+
+def dedupe_knowledge_candidates(candidates: Iterable[KnowledgeCandidate]) -> List[KnowledgeCandidate]:
+    """Drop exact (head, relation) duplicates and near-identical candidate text."""
+    kept: List[KnowledgeCandidate] = []
+    seen_keys = set()
+    seen_texts: List[str] = []
+    for candidate in candidates:
+        if candidate.triplet is not None:
+            key = (_content_key(candidate.triplet.head), _content_key(candidate.triplet.relation))
+        else:
+            key = _content_key(candidate.text)[:10]
+        if key in seen_keys:
+            continue
+        norm = re.sub(r"\s+", " ", (candidate.text or "").lower()).strip()
+        if any(SequenceMatcher(None, norm, prior).ratio() >= 0.92 for prior in seen_texts):
+            continue
+        seen_keys.add(key)
+        seen_texts.append(norm)
+        kept.append(candidate)
+    return kept
 
 
 @dataclass
@@ -74,6 +125,7 @@ class SentenceBertRanker:
     def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
         from sentence_transformers import SentenceTransformer
 
+        _configure_hf_token()
         self.model = SentenceTransformer(model_name)
 
     def rank_with_scores(
@@ -187,9 +239,9 @@ def rank_candidates(
     ranker: Optional[CandidateRanker] = None,
     min_score: float = DEFAULT_MIN_SCORE,
 ) -> Tuple[List[KnowledgeCandidate], float]:
+    pool = dedupe_knowledge_candidates(candidates)
     if ranker is None:
         ranker = SentenceBertRanker()
-    pool = list(candidates)
     result = ranker.rank_candidates_with_scores(dialog_history, pool, top_k=max(top_k, len(pool)))
     gated = apply_score_gate(result.candidates, result.scores, min_score=min_score, max_k=top_k)
     return gated.candidates, gated.top1_score
