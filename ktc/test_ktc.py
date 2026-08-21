@@ -277,6 +277,160 @@ class TestVerbalization(unittest.TestCase):
         self.assertEqual(call_kwargs["model"], "test-model")
 
 
+class TestEvidenceSynthesis(unittest.TestCase):
+    def _candidates(self) -> list[KnowledgeCandidate]:
+        return [
+            KnowledgeCandidate(
+                text="KIRAN, the national mental health helpline 1800-599-0019, offers 24x7 distress support in India.",
+                source="counseling_bank",
+                url="https://www.mohfw.gov.in/",
+                domain="clinical",
+            ),
+            KnowledgeCandidate(
+                text="A victim can file an FIR at the nearest police station.",
+                source="static_dataset",
+            ),
+        ]
+
+    @mock.patch.dict(os.environ, {}, clear=True)
+    def test_llm_falls_back_to_concatenation_without_api_key(self):
+        from ktc.synthesis import synthesize_evidence
+
+        passage = synthesize_evidence(self._candidates(), "user: I am going insane.")
+        self.assertIn("1800-599-0019", passage)
+        self.assertIn("FIR", passage)
+        self.assertIn("KIRAN", passage)
+
+    def test_template_backend_concatenates(self):
+        from ktc.synthesis import synthesize_evidence
+
+        passage = synthesize_evidence(
+            self._candidates(),
+            "user: I am going insane.",
+            backend="template",
+        )
+        self.assertTrue(passage.startswith("KIRAN"))
+        self.assertIn("police station", passage.lower())
+
+    @mock.patch("ktc.synthesis._make_llm_client")
+    def test_llm_synthesis_uses_chat_api(self, mock_make_client):
+        from ktc.synthesis import DEFAULT_SYNTHESIS_MODEL, synthesize_evidence
+
+        grounded = (
+            "KIRAN, the national mental health helpline 1800-599-0019, offers 24x7 distress "
+            "support in India. A victim can file an FIR at the nearest police station."
+        )
+        mock_client = mock.Mock()
+        mock_response = mock.Mock()
+        mock_response.choices = [mock.Mock(message=mock.Mock(content=grounded))]
+        mock_client.chat.completions.create.return_value = mock_response
+        mock_make_client.return_value = (mock_client, LiveRetrievalConfig(llm_model="ignored-model"))
+
+        fake_openai = mock.Mock()
+        with mock.patch.dict(os.environ, {"LLM_API_KEY": "ollama"}):
+            with mock.patch.dict(sys.modules, {"openai": fake_openai}):
+                passage = synthesize_evidence(self._candidates(), "user: I am going insane.")
+
+        self.assertEqual(passage, grounded if grounded.endswith(".") else grounded + ".")
+        mock_client.chat.completions.create.assert_called_once()
+        call_kwargs = mock_client.chat.completions.create.call_args.kwargs
+        self.assertEqual(call_kwargs["model"], DEFAULT_SYNTHESIS_MODEL)
+        self.assertEqual(call_kwargs["temperature"], 0)
+        self.assertEqual(call_kwargs["max_tokens"], 300)
+        self.assertIn("1800-599-0019", call_kwargs["messages"][1]["content"])
+
+    @mock.patch("ktc.synthesis._make_llm_client")
+    def test_grounding_check_rejects_hallucinated_phone(self, mock_make_client):
+        from ktc.synthesis import synthesize_evidence
+
+        hallucinated = (
+            "Call iCall on 9152987821 and KIRAN on 1800-599-0019 for distress support."
+        )
+        mock_client = mock.Mock()
+        mock_response = mock.Mock()
+        mock_response.choices = [mock.Mock(message=mock.Mock(content=hallucinated))]
+        mock_client.chat.completions.create.return_value = mock_response
+        mock_make_client.return_value = (mock_client, LiveRetrievalConfig())
+
+        fake_openai = mock.Mock()
+        with mock.patch.dict(os.environ, {"LLM_API_KEY": "ollama"}):
+            with mock.patch.dict(sys.modules, {"openai": fake_openai}):
+                passage = synthesize_evidence(self._candidates(), "user: I am going insane.")
+
+        self.assertNotIn("9152987821", passage)
+        self.assertIn("1800-599-0019", passage)
+        self.assertIn("FIR", passage)
+
+    @mock.patch("ktc.synthesis._make_llm_client")
+    def test_malformed_output_falls_back(self, mock_make_client):
+        from ktc.synthesis import synthesize_evidence
+
+        mock_client = mock.Mock()
+        mock_response = mock.Mock()
+        mock_response.choices = [mock.Mock(message=mock.Mock(content=""))]
+        mock_client.chat.completions.create.return_value = mock_response
+        mock_make_client.return_value = (mock_client, LiveRetrievalConfig())
+
+        fake_openai = mock.Mock()
+        with mock.patch.dict(os.environ, {"LLM_API_KEY": "ollama"}):
+            with mock.patch.dict(sys.modules, {"openai": fake_openai}):
+                passage = synthesize_evidence(self._candidates(), "user: help")
+
+        self.assertIn("KIRAN", passage)
+
+    def test_pipeline_synthesize_defaults_off(self):
+        from ktc.pipeline import KnowledgeTripletPipeline
+        from ktc.ranking import CandidateRankingResult
+
+        class _PassthroughRanker:
+            model = None
+
+            def rank_candidates_with_scores(self, dialog_history, candidates, top_k=26):
+                cl = list(candidates)
+                scores = [0.9] * len(cl)
+                return CandidateRankingResult(cl[:top_k], scores[:top_k], 0.9 if cl else 0.0)
+
+        pipeline = KnowledgeTripletPipeline(
+            verbalization_backend="template",
+            coref_backend="heuristic",
+            ranker=_PassthroughRanker(),
+            min_cosine=0.0,
+        )
+        result = pipeline.run_hybrid(
+            "Victims can file a complaint online.",
+            "agent: Hi. victim: I need help filing a complaint.",
+            enable_live=False,
+        )
+        self.assertIsNone(result.synthesized_knowledge)
+
+    def test_pipeline_synthesize_true_fills_field(self):
+        from ktc.pipeline import KnowledgeTripletPipeline
+        from ktc.ranking import CandidateRankingResult
+
+        class _EmptyRanker:
+            model = None
+
+            def rank_candidates_with_scores(self, dialog_history, candidates, top_k=26):
+                cl = list(candidates)
+                scores = [0.9] * len(cl)
+                return CandidateRankingResult(cl[:top_k], scores[:top_k], 0.9 if cl else 0.0)
+
+        pipeline = KnowledgeTripletPipeline(
+            verbalization_backend="template",
+            coref_backend="heuristic",
+            ranker=_EmptyRanker(),
+            min_cosine=0.0,
+        )
+        with mock.patch.dict(os.environ, {}, clear=True):
+            result = pipeline.run_hybrid(
+                "Victims can file a complaint online.",
+                "agent: Hi. victim: I need help filing a complaint.",
+                enable_live=False,
+                synthesize=True,
+            )
+        self.assertIsNotNone(result.synthesized_knowledge)
+
+
 class TestCoreference(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

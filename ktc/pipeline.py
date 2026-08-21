@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Tuple
 
 from ktc.coreference import resolve_coreferences
@@ -35,6 +35,7 @@ from ktc.ranking import (
     ranking_query_from_history,
 )
 from ktc.reply_knowledge import is_ktc_usable, is_reply_usable
+from ktc.synthesis import DEFAULT_SYNTHESIS_MODEL, synthesize_evidence
 from ktc.triplet import Triplet
 from ktc.verbalization import verbalize_triplets
 
@@ -64,6 +65,7 @@ class HybridRunResult:
     live_verbalized: List[str] = field(default_factory=list)
     victim_span: str = ""
     supplemental_counseling: List[KnowledgeCandidate] = field(default_factory=list)
+    synthesized_knowledge: Optional[str] = None
 
 
 @dataclass
@@ -76,6 +78,7 @@ class KnowledgeTripletPipeline:
     openie_backend: str = "spacy"
     coref_backend: str = "heuristic"
     verbalization_backend: str = "llm"
+    synthesis_model: str = DEFAULT_SYNTHESIS_MODEL
     ranker: Optional[CandidateRanker] = field(default=None, repr=False)
     _nlp: Optional[object] = field(default=None, repr=False)
     _passage_cache: Dict[str, List[Triplet]] = field(default_factory=dict, repr=False)
@@ -176,9 +179,14 @@ class KnowledgeTripletPipeline:
         dialog_history: str,
         filtered: Optional[List[Triplet]] = None,
         enable_live: Optional[bool] = None,
+        synthesize: bool = False,
     ) -> List[str]:
         return self.run_hybrid(
-            knowledge_text, dialog_history, filtered=filtered, enable_live=enable_live
+            knowledge_text,
+            dialog_history,
+            filtered=filtered,
+            enable_live=enable_live,
+            synthesize=synthesize,
         ).verbalized
 
     def run_with_score(
@@ -187,9 +195,14 @@ class KnowledgeTripletPipeline:
         dialog_history: str,
         filtered: Optional[List[Triplet]] = None,
         enable_live: Optional[bool] = None,
+        synthesize: bool = False,
     ) -> Tuple[List[str], float]:
         result = self.run_hybrid(
-            knowledge_text, dialog_history, filtered=filtered, enable_live=enable_live
+            knowledge_text,
+            dialog_history,
+            filtered=filtered,
+            enable_live=enable_live,
+            synthesize=synthesize,
         )
         return result.verbalized, result.top1_similarity_score
 
@@ -199,6 +212,7 @@ class KnowledgeTripletPipeline:
         dialog_history: str,
         filtered: Optional[List[Triplet]] = None,
         enable_live: Optional[bool] = None,
+        synthesize: bool = False,
     ) -> HybridRunResult:
         nlp = self._get_nlp()
         query = ranking_query_from_history(dialog_history, nlp=nlp)
@@ -279,6 +293,21 @@ class KnowledgeTripletPipeline:
             for candidate, sentence in zip(ranked, verbalized)
             if candidate.source == "live_api"
         ]
+        synthesized_knowledge = None
+        if synthesize:
+            evidence: List[KnowledgeCandidate] = []
+            if len(verbalized) == len(ranked):
+                evidence = [replace(candidate, text=sentence) for candidate, sentence in zip(ranked, verbalized)]
+            else:
+                evidence = list(ranked)
+            evidence.extend(supplemental)
+            synthesized_knowledge = synthesize_evidence(
+                evidence,
+                dialog_history,
+                backend="llm",
+                model=self.synthesis_model,
+                llm_config=self.live_config,
+            )
         return HybridRunResult(
             verbalized=verbalized,
             top1_similarity_score=top1_score,
@@ -296,17 +325,25 @@ class KnowledgeTripletPipeline:
             live_verbalized=live_verbalized,
             victim_span=victim_span,
             supplemental_counseling=supplemental,
+            synthesized_knowledge=synthesized_knowledge,
         )
 
     def run_raw_knowledge(self, knowledge_text: str) -> List[str]:
         text = knowledge_text.strip()
         return [text] if text else []
 
-    def inspect(self, knowledge_text: str, dialog_history: str, enable_live: Optional[bool] = None) -> dict:
+    def inspect(
+        self,
+        knowledge_text: str,
+        dialog_history: str,
+        enable_live: Optional[bool] = None,
+        synthesize: bool = False,
+    ) -> dict:
         hybrid = self.run_hybrid(
             knowledge_text,
             dialog_history,
             enable_live=enable_live,
+            synthesize=synthesize,
         )
         used_text = " ".join(hybrid.passages_used)
         module_knowledge = list(hybrid.verbalized)
@@ -314,6 +351,8 @@ class KnowledgeTripletPipeline:
             "query_field_note": (
                 "verbalized is Stage 2e over OpenIE triplets from gated KARE passages and live pages. "
                 "supplemental_counseling is trigger-matched local facts and is not mixed into verbalized. "
+                "synthesized_knowledge is LLM-3 evidence synthesis over ranked + supplemental candidates; "
+                "it is null unless inspect/run_hybrid is called with synthesize=True. "
                 "Live ranked_candidates[].query is the Tavily search string; it is null/absent on static triplets."
             ),
             "victim_span": hybrid.victim_span,
@@ -335,6 +374,7 @@ class KnowledgeTripletPipeline:
             "supplemental_counseling": [c.to_dict() for c in hybrid.supplemental_counseling],
             "reply_knowledge": hybrid.verbalized,
             "verbalized": hybrid.verbalized,
+            "synthesized_knowledge": hybrid.synthesized_knowledge,
             "module_knowledge": module_knowledge,
             "ranked_candidates": [c.to_dict() for c in hybrid.ranked_candidates],
             "top1_similarity_score": hybrid.top1_similarity_score,

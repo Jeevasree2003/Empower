@@ -120,6 +120,15 @@ def print_demo(dialogue: dict, history: str, result: dict, turn: int) -> None:
     for sentence in sents:
         print(f"  - {sentence}")
 
+    _print_stage("STAGE 5  synthesized_knowledge (LLM-3; --synthesize)")
+    synthesized = result.get("synthesized_knowledge")
+    if synthesized is None:
+        print("  (not requested). Re-run with --synthesize to merge candidates into one passage.")
+    elif not synthesized.strip():
+        print("  (empty — no ranked/supplemental candidates to synthesize)")
+    else:
+        print(synthesized)
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Inspect gated KTC stages for one turn.")
@@ -147,6 +156,12 @@ def main() -> None:
         action="store_true",
         help="Print the raw inspect JSON instead of the demo stage dump.",
     )
+    parser.add_argument(
+        "--synthesize",
+        action="store_true",
+        default=False,
+        help="Run LLM-3 evidence synthesis and print it next to per-candidate verbalized output.",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -161,6 +176,7 @@ def main() -> None:
         dialogue.get("knowledge", "") or "",
         history,
         enable_live=args.enable_live,
+        synthesize=args.synthesize,
     )
     if args.json:
         print(json.dumps(result, indent=2, ensure_ascii=False))
