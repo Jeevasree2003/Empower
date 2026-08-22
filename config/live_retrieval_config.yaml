@@ -46,3 +46,6 @@ max_concurrent_queries: 3
 
 # Hard wall-clock cap for live retrieval on one dialogue turn (seconds).
 max_live_retrieval_seconds: 20
+
+# Top live-page sentences kept per URL by SBERT cosine (parallel to OpenIE).
+live_sentence_top_k: 3

@@ -139,7 +139,7 @@ def _crime_statute_indiacode_query(entity: str) -> Optional[SearchQuery]:
     if not section:
         return None
     return SearchQuery(
-        f"IPC Section {section} indiacode.nic.in {entity} India",
+        f"IPC Section {section} indiacode.nic.in indiankanoon.org {entity} India",
         entity,
         CATEGORY_CRIME,
         "crime_statute_indiacode",
@@ -278,7 +278,7 @@ def _situation_queries(victim_text: str) -> List[SearchQuery]:
                         "sit_homicide_report",
                     ),
                     _sq(
-                        f"IPC Section 302 506 murder threat police protection India indiacode {year}",
+                        f"IPC Section 302 506 murder threat police protection India indiacode.nic.in indiankanoon.org {year}",
                         "murder or homicide threat",
                         CATEGORY_CRIME,
                         "crime_statute_indiacode",
@@ -295,7 +295,7 @@ def _situation_queries(victim_text: str) -> List[SearchQuery]:
                         "sit_rape_report",
                     ),
                     _sq(
-                        f"IPC Section 376 rape India indiacode.nic.in",
+                        f"IPC Section 376 rape India indiacode.nic.in indiankanoon.org",
                         "rape",
                         CATEGORY_CRIME,
                         "crime_statute_indiacode",
@@ -305,7 +305,7 @@ def _situation_queries(victim_text: str) -> List[SearchQuery]:
         elif name == "gang_rape":
             queries.append(
                 _sq(
-                    f"IPC Section 376D gang rape delayed FIR medical examination India indiacode {year}",
+                    f"IPC Section 376D gang rape delayed FIR medical examination India indiacode.nic.in indiankanoon.org {year}",
                     "gang rape",
                     CATEGORY_CRIME,
                     "sit_rape_report",
@@ -368,7 +368,7 @@ def _situation_queries(victim_text: str) -> List[SearchQuery]:
         elif name == "desertion_bigamy":
             queries.append(
                 _sq(
-                    f"IPC Section 494 bigamy 498A cruelty desertion India indiacode {year}",
+                    f"IPC Section 494 bigamy 498A cruelty desertion India indiacode.nic.in indiankanoon.org {year}",
                     "bigamy",
                     CATEGORY_CRIME,
                     "crime_statute_indiacode",
@@ -511,7 +511,7 @@ def _legal_queries(entity: str) -> List[SearchQuery]:
     if lower in _FIR_PROCEDURE_ENTITIES:
         return [
             SearchQuery(
-                f"CrPC Section 154 information police station FIR procedure India indiacode {CURRENT_YEAR}",
+                f"CrPC Section 154 information police station FIR procedure India indiacode.nic.in indiankanoon.org {CURRENT_YEAR}",
                 entity,
                 CATEGORY_LEGAL,
                 "legal_fir_procedure",

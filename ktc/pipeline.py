@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import time
 from dataclasses import dataclass, field, replace
@@ -40,6 +41,8 @@ from ktc.synthesis import DEFAULT_SYNTHESIS_MODEL, synthesize_evidence
 from ktc.triplet import Triplet
 from ktc.verbalization import verbalize_triplets
 
+logger = logging.getLogger(__name__)
+
 _SCAM_NOISE = re.compile(
     r"romance scam|kinjal|high return scheme|fake kyc|investment scheme|"
     r"unsolicited communication via sms|awarding you a life-changing amount",
@@ -58,6 +61,30 @@ _LEGAL_IN_TEXT = re.compile(
 
 def _normalize_sentence(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip().lower()).rstrip(".!?")
+
+
+def _dedup_texts(texts: Sequence[str]) -> List[str]:
+    out: List[str] = []
+    seen = set()
+    for text in texts:
+        key = _normalize_sentence(text)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(text)
+    return out
+
+
+def _dedup_ranked_candidates(candidates: Sequence[KnowledgeCandidate]) -> List[KnowledgeCandidate]:
+    out: List[KnowledgeCandidate] = []
+    seen = set()
+    for item in candidates:
+        key = _normalize_sentence(item.text)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
 
 
 def _domain_represented(verbalized: Sequence[str], domain: Optional[str]) -> bool:
@@ -129,6 +156,8 @@ class HybridRunResult:
     final_knowledge_text: str = ""
     final_knowledge_sources: List[str] = field(default_factory=list)
     live_elapsed_seconds: Optional[float] = None
+    knowledge_funnel: Optional[Dict[str, object]] = None
+    live_page_stats: List[Dict] = field(default_factory=list)
 
 
 @dataclass
@@ -319,15 +348,18 @@ class KnowledgeTripletPipeline:
         pool = static_candidates_from_triplets(filtered)
         live_on = self.live_config.enable_live_retrieval if enable_live is None else enable_live
         live_elapsed_seconds = None
+        live_funnel = None
 
         if live_on:
             started = time.monotonic()
-            live_candidates, constructed, _raw = fetch_live_knowledge(
+            live_candidates, constructed, _raw, live_funnel = fetch_live_knowledge(
                 victim_span,
                 self.live_config,
                 self.api_budget,
                 nlp=nlp,
                 enabled=True,
+                ranker=self._get_ranker(),
+                min_cosine=self.min_cosine,
             )
             live_elapsed_seconds = time.monotonic() - started
             pool.extend(live_candidates)
@@ -341,8 +373,9 @@ class KnowledgeTripletPipeline:
             min_cosine=self.min_cosine,
         )
         ranked = [c for c in ranked if is_ktc_usable(c)]
+        ranked = _dedup_ranked_candidates(ranked)
         supplemental = counseling_candidates(entities, victim_span)
-        verbalized = self._verbalize_candidates(ranked)
+        verbalized = _dedup_texts(self._verbalize_candidates(ranked))
         static_verbalized = []
         if filtered:
             for sentence in verbalize_triplets(
@@ -377,6 +410,32 @@ class KnowledgeTripletPipeline:
         final_knowledge_text, final_sources = assemble_final_knowledge_text(
             verbalized, supplemental
         )
+        live_pages = list((live_funnel.pages if live_funnel else []) or [])
+        verbalized_keys = {_normalize_sentence(text) for text in verbalized}
+        for page in live_pages:
+            made = []
+            for text in (page.get("openie_texts") or []) + (page.get("sentence_relevance_texts") or []):
+                if _normalize_sentence(text) in verbalized_keys:
+                    made.append(text)
+            page["made_verbalized"] = made
+        funnel = {
+            "live_sentences": (live_funnel.live_sentences if live_funnel else 0),
+            "live_triplets": (live_funnel.live_triplets if live_funnel else 0),
+            "live_sentence_relevance": (live_funnel.live_sentence_relevance if live_funnel else 0),
+            "static_triplets": len(filtered or []),
+            "gate_passed": len(ranked),
+            "final_verbalized_count": len(verbalized),
+        }
+        logger.info(
+            "knowledge_funnel live_sentences=%s live_triplets=%s live_sentence_relevance=%s "
+            "static_triplets=%s gate_passed=%s final_verbalized_count=%s",
+            funnel["live_sentences"],
+            funnel["live_triplets"],
+            funnel["live_sentence_relevance"],
+            funnel["static_triplets"],
+            funnel["gate_passed"],
+            funnel["final_verbalized_count"],
+        )
         return HybridRunResult(
             verbalized=verbalized,
             top1_similarity_score=top1_score,
@@ -398,6 +457,8 @@ class KnowledgeTripletPipeline:
             final_knowledge_text=final_knowledge_text,
             final_knowledge_sources=final_sources,
             live_elapsed_seconds=live_elapsed_seconds,
+            knowledge_funnel=funnel,
+            live_page_stats=live_pages,
         )
 
     def run_raw_knowledge(self, knowledge_text: str) -> List[str]:
@@ -445,6 +506,8 @@ class KnowledgeTripletPipeline:
                 "enabled": hybrid.live_enabled,
                 "verbalized": hybrid.live_verbalized,
                 "elapsed_seconds": hybrid.live_elapsed_seconds,
+                "pages": hybrid.live_page_stats,
+                "funnel": hybrid.knowledge_funnel,
             },
             "counseling_bank_used": hybrid.counseling_bank_used,
             "supplemental_counseling": [c.to_dict() for c in hybrid.supplemental_counseling],
@@ -462,4 +525,5 @@ class KnowledgeTripletPipeline:
             "cleaned_knowledge_preview": used_text[:240],
             "no_passages_used": hybrid.no_passages_used,
             "live_retrieval_enabled": hybrid.live_enabled,
+            "knowledge_funnel": hybrid.knowledge_funnel,
         }

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional
 
 from ktc.live_config import ApiCallBudget, LiveRetrievalConfig
@@ -86,14 +86,7 @@ def extractive_sentences(query: str, text: str, max_n: int = 3) -> List[str]:
         return []
     tokens = _query_tokens(query)
     ranked: List[tuple] = []
-    for raw in _SENTENCE_SPLIT.split(re.sub(r"\s+", " ", text.strip())):
-        line = raw.strip()
-        if len(line) < 40 or len(line) > 420:
-            continue
-        if _NAV_FOOTER.search(line) or _is_broken_live_sentence(line) or _is_meta_commentary(line):
-            continue
-        if _NON_COUNSELOR_PROSE.search(line):
-            continue
+    for line in split_live_sentences(text):
         stoks = set(re.findall(r"[a-z0-9]+", line.lower()))
         overlap = len(tokens & stoks)
         if overlap == 0 and not _PHONE_PATTERN.search(line):
@@ -113,6 +106,28 @@ def extractive_sentences(query: str, text: str, max_n: int = 3) -> List[str]:
     return selected
 
 
+def split_live_sentences(text: str) -> List[str]:
+    """Sentence-split live page text, dropping nav/footer and policy prose."""
+    if not text or not text.strip():
+        return []
+    selected: List[str] = []
+    seen = set()
+    for raw in _SENTENCE_SPLIT.split(re.sub(r"\s+", " ", text.strip())):
+        line = raw.strip()
+        if len(line) < 40 or len(line) > 420:
+            continue
+        if _NAV_FOOTER.search(line) or _is_broken_live_sentence(line) or _is_meta_commentary(line):
+            continue
+        if _NON_COUNSELOR_PROSE.search(line):
+            continue
+        key = line.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(line)
+    return selected
+
+
 @dataclass
 class LiveKnowledgeSentence:
     sentence: str
@@ -124,6 +139,22 @@ class LiveKnowledgeSentence:
             "sentence": self.sentence,
             "source_url": self.source_url,
             "query": self.query,
+        }
+
+
+@dataclass
+class LivePageStats:
+    url: str
+    query: str
+    sentences_extracted: int
+    sentences: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "url": self.url,
+            "query": self.query,
+            "sentences_extracted": self.sentences_extracted,
+            "sentences": self.sentences,
         }
 
 
@@ -223,6 +254,7 @@ def summarize_search_results(
     config: LiveRetrievalConfig,
     budget: Optional[ApiCallBudget] = None,
     deadline=None,
+    page_stats: Optional[List[LivePageStats]] = None,
 ) -> List[LiveKnowledgeSentence]:
     """Turn allowlisted search hits into factual sentences. Never raises.
 
@@ -274,6 +306,17 @@ def summarize_search_results(
                         sentences = extractive_sentences(query, enriched.snippet)
             else:
                 sentences = extractive_sentences(query, enriched.snippet)
+
+            split_sentences = split_live_sentences(enriched.snippet)
+            if page_stats is not None:
+                page_stats.append(
+                    LivePageStats(
+                        url=result.url,
+                        query=query,
+                        sentences_extracted=len(split_sentences),
+                        sentences=split_sentences,
+                    )
+                )
 
             for sentence in sentences:
                 attributed.append(

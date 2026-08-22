@@ -159,7 +159,7 @@ def _write_page_cache(path: Path, text: str) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _read_failure_age_seconds(path: Path, ttl_days: int) -> Optional[float]:
+def _read_failure_record(path: Path, ttl_days: int) -> Optional[tuple]:
     if not path.exists():
         return None
     try:
@@ -168,20 +168,49 @@ def _read_failure_age_seconds(path: Path, ttl_days: int) -> Optional[float]:
         age_seconds = (datetime.now(timezone.utc) - fetched_at).total_seconds()
         if age_seconds > ttl_days * 86400:
             return None
-        return age_seconds
+        reason = str(payload.get("reason") or "unknown")
+        return age_seconds, reason
     except Exception as exc:
         logger.warning("failure_cache_read_failed path=%s error=%s", path, exc)
         return None
 
 
-def _write_failure_cache(path: Path, url: str, error: str) -> None:
+def _write_failure_cache(path: Path, url: str, error: str, reason: str = "unknown") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "fetched_at": datetime.now(timezone.utc).isoformat(),
         "url": url,
         "error": error,
+        "reason": reason,
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def classify_fetch_failure(exc: BaseException) -> str:
+    """Stable reason token for logs and the failure cache."""
+    try:
+        import requests
+    except ImportError:
+        requests = None  # type: ignore
+
+    if requests is not None:
+        if isinstance(exc, (requests.Timeout, requests.exceptions.Timeout)):
+            return "timeout"
+        if isinstance(exc, requests.exceptions.ConnectionError):
+            return "connection_error"
+        if isinstance(exc, requests.HTTPError):
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status:
+                return f"status_{status}"
+            return "http_error"
+    if isinstance(exc, TimeoutError):
+        return "timeout"
+    name = type(exc).__name__.lower()
+    if "timeout" in name:
+        return "timeout"
+    if "connection" in name:
+        return "connection_error"
+    return name or "unknown"
 
 
 def run_io_tasks(
@@ -235,9 +264,15 @@ def fetch_page_text(
     """Fetch a page and extract readable main-body text for summarization."""
     cache_dir = cache_dir or DEFAULT_CACHE_DIR
     fail_file = _failure_cache_path(url, cache_dir)
-    fail_age = _read_failure_age_seconds(fail_file, failure_cache_ttl_days)
-    if fail_age is not None:
-        logger.info("skipping_known_bad_url url=%s cached_failure_age=%.0fs", url, fail_age)
+    cached_failure = _read_failure_record(fail_file, failure_cache_ttl_days)
+    if cached_failure is not None:
+        fail_age, fail_reason = cached_failure
+        logger.info(
+            "skipping_known_bad_url url=%s cached_failure_age=%.0fs reason=%s",
+            url,
+            fail_age,
+            fail_reason,
+        )
         return ""
 
     cache_file = _page_cache_path(url, cache_dir)
@@ -265,8 +300,9 @@ def fetch_page_text(
         response.raise_for_status()
         raw_html = response.text
     except Exception as exc:
-        _write_failure_cache(fail_file, url, str(exc))
-        logger.warning("page_fetch_failed url=%s error=%s", url, exc)
+        reason = classify_fetch_failure(exc)
+        _write_failure_cache(fail_file, url, str(exc), reason=reason)
+        logger.warning("page_fetch_failed url=%s reason=%s error=%s", url, reason, exc)
         raise
 
     raw_html = re.sub(r"(?is)<(script|style|noscript|svg)[^>]*>.*?</\1>", " ", raw_html)
@@ -313,7 +349,8 @@ def enrich_search_result(
             cache_dir=cache_dir,
         )
     except Exception as exc:
-        logger.warning("page_fetch_failed url=%s error=%s", result.url, exc)
+        reason = classify_fetch_failure(exc)
+        logger.debug("page_fetch_failed url=%s reason=%s error=%s", result.url, reason, exc)
         return result
     if not page_text:
         return result

@@ -33,6 +33,7 @@ class LiveRetrievalConfig:
     max_concurrent_fetches: int = 4
     max_concurrent_queries: int = 3
     max_live_retrieval_seconds: float = 20
+    live_sentence_top_k: int = 3
     trusted_domains: List[str] = field(default_factory=list)
     config_path: Path = field(default_factory=lambda: DEFAULT_CONFIG_PATH)
     domains_path: Path = field(default_factory=lambda: DEFAULT_DOMAINS_PATH)
@@ -76,6 +77,7 @@ class LiveRetrievalConfig:
             max_concurrent_fetches=int(data.get("max_concurrent_fetches", 4)),
             max_concurrent_queries=int(data.get("max_concurrent_queries", 3)),
             max_live_retrieval_seconds=float(data.get("max_live_retrieval_seconds", 20)),
+            live_sentence_top_k=int(data.get("live_sentence_top_k", 3)),
             trusted_domains=sorted(set(trusted)),
             config_path=config_path,
             domains_path=domains_path,

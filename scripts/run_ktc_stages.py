@@ -99,10 +99,39 @@ def print_demo(dialogue: dict, history: str, result: dict, turn: int) -> None:
     if elapsed is not None:
         print(f"live_retrieval_elapsed_seconds: {elapsed:.2f}")
     live_sents = live.get("verbalized") or []
+    pages = live.get("pages") or []
     if not live.get("enabled"):
         print("  live off (default). Re-run with --enable-live to fetch allowlisted pages.")
-    elif not live_sents:
-        print("  live on, but no OpenIE triplets survived filtering (nav/footer dropped).")
+    elif not live_sents and not pages:
+        print("  live on, but no OpenIE triplets or sentence-relevance hits survived.")
+    funnel = live.get("funnel") or result.get("knowledge_funnel") or {}
+    if funnel:
+        print(
+            "knowledge_funnel "
+            f"live_sentences={funnel.get('live_sentences')} "
+            f"live_triplets={funnel.get('live_triplets')} "
+            f"live_sentence_relevance={funnel.get('live_sentence_relevance')} "
+            f"static_triplets={funnel.get('static_triplets')} "
+            f"gate_passed={funnel.get('gate_passed')} "
+            f"final_verbalized_count={funnel.get('final_verbalized_count')}"
+        )
+    for page in pages:
+        print(f"  page: {page.get('url')}")
+        print(
+            f"    sentences_extracted={page.get('sentences_extracted')} "
+            f"triplets_extracted={page.get('triplets_extracted')} "
+            f"sentence_relevance_candidates={page.get('sentence_relevance_candidates')}"
+        )
+        made = page.get("made_verbalized") or []
+        if made:
+            print("    made_verbalized:")
+            for sentence in made:
+                print(f"      - {sentence}")
+        else:
+            print("    made_verbalized: (none)")
+    print("live verbalized:")
+    if not live_sents:
+        print("  (none)")
     for sentence in live_sents:
         print(f"  - {sentence}")
 

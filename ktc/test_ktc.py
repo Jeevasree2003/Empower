@@ -680,6 +680,7 @@ class TestLiveConfig(unittest.TestCase):
         config = LiveRetrievalConfig.load()
         self.assertTrue(all(d == d.lower() for d in config.trusted_domains))
         self.assertIn("icallhelpline.org", config.trusted_domains)
+        self.assertIn("indiankanoon.org", config.trusted_domains)
 
     def test_groq_llm_api_base_from_config(self):
         config = LiveRetrievalConfig.load()
@@ -700,6 +701,7 @@ class TestLiveConfig(unittest.TestCase):
         self.assertEqual(config.max_live_retrieval_seconds, 20)
         self.assertEqual(config.max_concurrent_fetches, 4)
         self.assertEqual(config.max_concurrent_queries, 3)
+        self.assertEqual(config.live_sentence_top_k, 3)
 
 
 class TestLiveRetrieval(unittest.TestCase):
@@ -778,6 +780,26 @@ class TestLiveRetrieval(unittest.TestCase):
         second = fetch_page_text(url, cache_dir=cache_dir, timeout=1, failure_cache_ttl_days=1)
         self.assertEqual(second, "")
         self.assertEqual(mock_get.call_count, 1)
+
+    def test_page_fetch_failure_logs_distinct_reasons(self):
+        import uuid
+        import requests
+
+        from ktc.live_retrieval import fetch_page_text
+
+        cache_dir = Path(tempfile.mkdtemp())
+        timeout_url = f"https://indiacode.nic.in/timeout-{uuid.uuid4().hex}"
+        conn_url = f"https://indiacode.nic.in/conn-{uuid.uuid4().hex}"
+        with mock.patch("requests.get", side_effect=requests.Timeout("slow")):
+            with self.assertLogs("ktc.live_retrieval", level="WARNING") as cm:
+                with self.assertRaises(requests.Timeout):
+                    fetch_page_text(timeout_url, cache_dir=cache_dir, timeout=1)
+        self.assertTrue(any("reason=timeout" in line for line in cm.output))
+        with mock.patch("requests.get", side_effect=requests.ConnectionError("refused")):
+            with self.assertLogs("ktc.live_retrieval", level="WARNING") as cm:
+                with self.assertRaises(requests.ConnectionError):
+                    fetch_page_text(conn_url, cache_dir=cache_dir, timeout=1)
+        self.assertTrue(any("reason=connection_error" in line for line in cm.output))
 
     @mock.patch("ktc.live_retrieval.fetch_page_text")
     def test_concurrent_enrich_keeps_per_url_attribution(self, mock_fetch):
@@ -1041,7 +1063,7 @@ class TestLiveKnowledge(unittest.TestCase):
         ]
         config = LiveRetrievalConfig(enable_live_retrieval=True, max_live_queries_per_dialogue=1)
         budget = ApiCallBudget(10)
-        candidates, queries, raw = fetch_live_knowledge(
+        candidates, queries, raw, _funnel = fetch_live_knowledge(
             "my husband threatens me", config, budget
         )
         self.assertTrue(queries)
@@ -1072,7 +1094,7 @@ class TestLiveKnowledge(unittest.TestCase):
             ),
         ]
         config = LiveRetrievalConfig(enable_live_retrieval=True, max_live_queries_per_dialogue=1)
-        candidates, _queries, _raw = fetch_live_knowledge(
+        candidates, _queries, _raw, _funnel = fetch_live_knowledge(
             "I am going insane where to go for help", config, ApiCallBudget(10)
         )
         joined = " ".join(c.text.lower() for c in candidates)
@@ -1116,6 +1138,57 @@ class TestLiveKnowledge(unittest.TestCase):
         self.assertEqual(len(candidates), 1)
         self.assertEqual(candidates[0].source, "static_dataset")
         self.assertIsNotNone(candidates[0].triplet)
+
+    def test_sentence_relevance_works_when_openie_empty(self):
+        from ktc.live_knowledge import sentence_relevance_candidates
+        from ktc.live_summarize import LivePageStats
+
+        pages = [
+            LivePageStats(
+                url="https://icallhelpline.org/",
+                query="KIRAN mental health helpline India",
+                sentences_extracted=2,
+                sentences=[
+                    "KIRAN is a 24x7 mental health helpline 1800-599-0019 operated for distress support in India.",
+                    "The campus newsletter mentions a sports meet at IIT Bombay this weekend.",
+                ],
+            )
+        ]
+
+        class _QueryRanker:
+            def cosine_to_query(self, query, texts):
+                scores = []
+                for text in texts:
+                    scores.append(0.81 if "helpline" in text.lower() else 0.11)
+                return scores
+
+        with mock.patch("ktc.live_knowledge.extract_triplets", return_value=[]):
+            candidates = sentence_relevance_candidates(
+                pages, _QueryRanker(), min_cosine=0.38, top_k_per_page=3
+            )
+        joined = " ".join(c.text for c in candidates)
+        self.assertIn("1800-599-0019", joined)
+        self.assertNotIn("IIT Bombay", joined)
+        self.assertTrue(all(c.extraction_method == "sentence_relevance" for c in candidates))
+
+    def test_dedup_openie_and_sentence_relevance(self):
+        from ktc.live_knowledge import dedup_candidates
+        from ktc.pipeline import _dedup_texts
+
+        openie = KnowledgeCandidate(
+            text="KIRAN helpline 1800-599-0019 offers 24x7 support in India.",
+            source="live_api",
+            extraction_method="openie",
+        )
+        relevance = KnowledgeCandidate(
+            text="KIRAN helpline 1800-599-0019 offers 24x7 support in India",
+            source="live_api",
+            extraction_method="sentence_relevance",
+        )
+        merged = dedup_candidates([openie, relevance])
+        self.assertEqual(len(merged), 1)
+        verbalized = _dedup_texts([openie.text + ".", relevance.text])
+        self.assertEqual(len(verbalized), 1)
 
 
 class TestKnowledgeItem(unittest.TestCase):
@@ -1166,6 +1239,7 @@ class TestEntityExtraction(unittest.TestCase):
         statute = next(q for q in queries if q.template == "crime_statute_indiacode")
         self.assertIn("376", statute.text)
         self.assertIn("indiacode", statute.text.lower())
+        self.assertIn("indiankanoon", statute.text.lower())
 
     def test_murder_report_avoids_how_to_prefix(self):
         entities = [{"text": "murder", "category": CATEGORY_CRIME}]
@@ -1482,7 +1556,7 @@ class TestPipelineIntegration(unittest.TestCase):
         from ktc.pipeline import KnowledgeTripletPipeline
 
         with mock.patch(
-            "ktc.pipeline.fetch_live_knowledge", return_value=([], [], [])
+            "ktc.pipeline.fetch_live_knowledge", return_value=([], [], [], None)
         ) as fetch:
             pipeline = KnowledgeTripletPipeline(
                 verbalization_backend="template",
@@ -1517,6 +1591,27 @@ class TestPipelineIntegration(unittest.TestCase):
         self.assertTrue(result.no_passages_used)
         self.assertEqual(result.final_knowledge_text, "")
         self.assertEqual(result.final_knowledge_sources, [])
+
+    def test_knowledge_funnel_log_line(self):
+        from ktc.pipeline import KnowledgeTripletPipeline
+
+        pipeline = KnowledgeTripletPipeline(
+            verbalization_backend="template",
+            coref_backend="heuristic",
+            ranker=self._passthrough_ranker(),
+            min_cosine=0.0,
+        )
+        with self.assertLogs("ktc.pipeline", level="INFO") as cm:
+            result = pipeline.run_hybrid(
+                "Victims can file a complaint at the police station.",
+                "agent: Hi. victim: I need help filing a complaint.",
+                enable_live=False,
+            )
+        funnel_lines = [line for line in cm.output if "knowledge_funnel" in line]
+        self.assertTrue(funnel_lines)
+        self.assertIn("static_triplets=", funnel_lines[0])
+        self.assertIn(f"final_verbalized_count={len(result.verbalized)}", funnel_lines[0])
+        self.assertIn("live_sentences=0", funnel_lines[0])
 
     def test_off_topic_blob_yields_no_static_when_gate_fails(self):
         from ktc.ranking import CandidateRankingResult

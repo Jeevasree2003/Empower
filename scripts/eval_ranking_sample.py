@@ -101,7 +101,7 @@ def evaluate_dialogue(
     static_pool = static_candidates_from_triplets(filtered)
 
     pipeline.api_budget = ApiCallBudget(config.max_api_calls_per_run)
-    live_candidates, _queries, _raw = fetch_live_knowledge(
+    live_candidates, _queries, _raw, _funnel = fetch_live_knowledge(
         victim, config, pipeline.api_budget, nlp=pipeline._get_nlp()
     )
     hybrid_pool = static_pool + live_candidates

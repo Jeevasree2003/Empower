@@ -18,6 +18,7 @@ class KnowledgeCandidate:
     query: Optional[str] = None
     triplet: Optional[Triplet] = None
     domain: Optional[str] = None  # "legal" | "clinical" | None
+    extraction_method: Optional[str] = None  # "openie" | "sentence_relevance"
 
     def to_dict(self) -> dict:
         payload = {
@@ -26,6 +27,7 @@ class KnowledgeCandidate:
             "url": self.url,
             "query": self.query,
             "domain": self.domain,
+            "extraction_method": self.extraction_method,
         }
         if self.triplet is not None:
             payload["triplet"] = self.triplet.to_dict()

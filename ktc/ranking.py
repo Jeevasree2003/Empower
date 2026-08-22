@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Iterable, List, Optional, Protocol, Tuple, runtime_checkable
 
 import numpy as np
+import re
 
 from ktc.knowledge_item import KnowledgeCandidate
 from ktc.triplet import Triplet
@@ -143,6 +144,15 @@ class SentenceBertRanker:
         top1 = ranked_scores[0] if ranked_scores else 0.0
         return CandidateRankingResult(candidates=ranked, scores=ranked_scores, top1_score=top1)
 
+    def cosine_to_query(self, query: str, texts: List[str]) -> List[float]:
+        """Cosine similarity of each text to *query* using this ranker's encoder."""
+        if not texts:
+            return []
+        query_emb = self.model.encode(query.strip() or " ", normalize_embeddings=True)
+        text_embs = self.model.encode(list(texts), normalize_embeddings=True)
+        scores = np.dot(text_embs, query_emb)
+        return [float(score) for score in scores]
+
 
 class CrossEncoderReranker:
     """Bi-encoder retrieve + cross-encoder rerank for sharper relevance scoring.
@@ -186,6 +196,50 @@ class CrossEncoderReranker:
         ranked_scores = [float(ce_scores[i]) for i in order]
         top1 = ranked_scores[0] if ranked_scores else 0.0
         return CandidateRankingResult(candidates=ranked, scores=ranked_scores, top1_score=top1)
+
+    def cosine_to_query(self, query: str, texts: List[str]) -> List[float]:
+        return self.bi_encoder.cosine_to_query(query, texts)
+
+
+def cosine_scores_for_query(ranker, query: str, texts: List[str]) -> List[float]:
+    """Score texts against a query with the pipeline ranker's encoder when available."""
+    if not texts:
+        return []
+    method = getattr(ranker, "cosine_to_query", None)
+    if callable(method):
+        return list(method(query, texts))
+    model = getattr(ranker, "model", None)
+    if model is None:
+        return []
+    query_emb = model.encode(query.strip() or " ", normalize_embeddings=True)
+    text_embs = model.encode(list(texts), normalize_embeddings=True)
+    return [float(score) for score in np.dot(text_embs, query_emb)]
+
+
+def select_sentences_by_cosine(
+    query: str,
+    sentences: List[str],
+    ranker,
+    *,
+    min_cosine: float = MIN_COSINE,
+    top_k: int = 3,
+) -> List[Tuple[str, float]]:
+    """Keep up to *top_k* sentences with cosine >= *min_cosine*."""
+    unique: List[str] = []
+    seen = set()
+    for sentence in sentences:
+        key = re.sub(r"\s+", " ", (sentence or "").strip().lower()).rstrip(".!?")
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        unique.append(sentence.strip())
+    if not unique:
+        return []
+    scores = cosine_scores_for_query(ranker, query, unique)
+    if not scores:
+        return []
+    ranked = sorted(zip(unique, scores), key=lambda item: item[1], reverse=True)
+    return [(text, score) for text, score in ranked if score >= min_cosine][:top_k]
 
 
 def rank_triplets(
