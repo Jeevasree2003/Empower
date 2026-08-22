@@ -343,6 +343,11 @@ class TestEvidenceSynthesis(unittest.TestCase):
         self.assertEqual(call_kwargs["temperature"], 0)
         self.assertEqual(call_kwargs["max_tokens"], 1024)
         self.assertIn("1800-599-0019", call_kwargs["messages"][1]["content"])
+        system_prompt = call_kwargs["messages"][0]["content"]
+        self.assertIn("You are given a numbered list of candidate facts below", system_prompt)
+        self.assertIn("NOT to select a subset", system_prompt)
+        self.assertIn("do not drop any fact's core content", system_prompt)
+        self.assertIn("Do not select a subset", call_kwargs["messages"][1]["content"])
 
     @mock.patch("ktc.synthesis._make_llm_client")
     def test_grounding_check_rejects_hallucinated_phone(self, mock_make_client):
@@ -384,6 +389,76 @@ class TestEvidenceSynthesis(unittest.TestCase):
 
         self.assertFalse(result.used_llm)
         self.assertIn("KIRAN", result.text)
+
+    def test_coverage_gap_logs_dropped_phone_fact(self):
+        from ktc.synthesis import log_coverage_gaps
+
+        candidates = self._candidates() + [
+            KnowledgeCandidate(
+                text="iCall psychosocial helpline 9152987821 provides confidential counseling.",
+                source="counseling_bank",
+            )
+        ]
+        passage = (
+            "KIRAN, the national mental health helpline 1800-599-0019, offers 24x7 distress "
+            "support in India. A victim can file an FIR at the nearest police station."
+        )
+        with mock.patch("ktc.synthesis.logger") as mock_logger:
+            gaps = log_coverage_gaps(passage, candidates)
+        self.assertEqual(len(gaps), 1)
+        self.assertIn("9152987821", gaps[0])
+        mock_logger.warning.assert_called()
+        log_msg = mock_logger.warning.call_args[0][0]
+        log_fact = mock_logger.warning.call_args[0][1]
+        self.assertEqual(log_msg, "synthesis_coverage_gap missing_fact=%r")
+        self.assertIn("9152987821", log_fact)
+
+    def test_coverage_gap_silent_when_all_tokens_present(self):
+        from ktc.synthesis import log_coverage_gaps
+
+        candidates = self._candidates() + [
+            KnowledgeCandidate(
+                text="iCall psychosocial helpline 9152987821 provides confidential counseling.",
+                source="counseling_bank",
+            )
+        ]
+        passage = (
+            "KIRAN 1800-599-0019 and iCall 9152987821 offer distress support. "
+            "A victim can file an FIR at the nearest police station."
+        )
+        with mock.patch("ktc.synthesis.logger") as mock_logger:
+            gaps = log_coverage_gaps(passage, candidates)
+        self.assertEqual(gaps, [])
+        mock_logger.warning.assert_not_called()
+
+    @mock.patch("ktc.synthesis._make_llm_client")
+    def test_successful_synthesis_logs_coverage_gap_for_dropped_fact(self, mock_make_client):
+        from ktc.synthesis import synthesize_evidence
+
+        candidates = self._candidates() + [
+            KnowledgeCandidate(
+                text="iCall psychosocial helpline 9152987821 provides confidential counseling.",
+                source="counseling_bank",
+            )
+        ]
+        trimmed = (
+            "KIRAN, the national mental health helpline 1800-599-0019, offers 24x7 distress "
+            "support in India. A victim can file an FIR at the nearest police station."
+        )
+        mock_client = mock.Mock()
+        mock_response = mock.Mock()
+        mock_response.choices = [mock.Mock(message=mock.Mock(content=trimmed))]
+        mock_client.chat.completions.create.return_value = mock_response
+        mock_make_client.return_value = (mock_client, LiveRetrievalConfig())
+
+        fake_openai = mock.Mock()
+        with mock.patch.dict(os.environ, {"LLM_API_KEY": "ollama"}):
+            with mock.patch.dict(sys.modules, {"openai": fake_openai}):
+                with self.assertLogs("ktc.synthesis", level="WARNING") as captured:
+                    result = synthesize_evidence(candidates, "user: I am going insane.")
+
+        self.assertTrue(result.used_llm)
+        self.assertTrue(any("synthesis_coverage_gap" in line and "9152987821" in line for line in captured.output))
 
     def test_pipeline_synthesize_defaults_off(self):
         from ktc.pipeline import KnowledgeTripletPipeline
