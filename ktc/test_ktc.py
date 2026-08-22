@@ -4,6 +4,8 @@ import json
 import os
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -691,6 +693,14 @@ class TestLiveConfig(unittest.TestCase):
         budget.record(1)
         self.assertFalse(budget.can_call())
 
+    def test_loaded_live_timeouts(self):
+        config = LiveRetrievalConfig.load()
+        self.assertEqual(config.page_fetch_timeout, 8)
+        self.assertEqual(config.search_timeout, 10)
+        self.assertEqual(config.max_live_retrieval_seconds, 20)
+        self.assertEqual(config.max_concurrent_fetches, 4)
+        self.assertEqual(config.max_concurrent_queries, 3)
+
 
 class TestLiveRetrieval(unittest.TestCase):
     def test_domain_allowed_case_insensitive(self):
@@ -753,6 +763,74 @@ class TestLiveRetrieval(unittest.TestCase):
         self.assertIn("9152987821", first)
         self.assertEqual(first, second)
         mock_get.assert_called_once()
+
+    @mock.patch("requests.get")
+    def test_failed_url_is_skipped_on_second_fetch(self, mock_get):
+        import uuid
+
+        from ktc.live_retrieval import fetch_page_text
+
+        mock_get.side_effect = TimeoutError("slow domain")
+        url = f"https://indiacode.nic.in/fail-{uuid.uuid4().hex}"
+        cache_dir = Path(tempfile.mkdtemp())
+        with self.assertRaises(TimeoutError):
+            fetch_page_text(url, cache_dir=cache_dir, timeout=1, failure_cache_ttl_days=1)
+        second = fetch_page_text(url, cache_dir=cache_dir, timeout=1, failure_cache_ttl_days=1)
+        self.assertEqual(second, "")
+        self.assertEqual(mock_get.call_count, 1)
+
+    @mock.patch("ktc.live_retrieval.fetch_page_text")
+    def test_concurrent_enrich_keeps_per_url_attribution(self, mock_fetch):
+        from ktc.live_retrieval import SearchResult, enrich_search_results
+
+        def _page(url, **kwargs):
+            if "good" in url:
+                return "KIRAN helpline 1800-599-0019 offers 24x7 support in India for people in distress."
+            raise ConnectionError("down")
+
+        mock_fetch.side_effect = _page
+        results = [
+            SearchResult(url="https://ncw.nic.in/good", title="ok", snippet="short", domain="ncw.nic.in"),
+            SearchResult(url="https://indiacode.nic.in/bad", title="bad", snippet="thin", domain="indiacode.nic.in"),
+        ]
+        config = LiveRetrievalConfig(max_concurrent_fetches=2, page_fetch_timeout=8)
+        enriched = enrich_search_results(results, config)
+        self.assertEqual(len(enriched), 2)
+        self.assertIn("1800-599-0019", enriched[0].snippet)
+        self.assertEqual(enriched[0].url, "https://ncw.nic.in/good")
+        self.assertEqual(enriched[1].url, "https://indiacode.nic.in/bad")
+        self.assertEqual(enriched[1].snippet, "thin")
+
+    def test_api_budget_holds_under_concurrent_record(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        budget = ApiCallBudget(5)
+
+        def worker():
+            for _ in range(20):
+                budget.record(1)
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(lambda _: worker(), range(8)))
+        self.assertEqual(budget.used, 5)
+        self.assertFalse(budget.can_call())
+
+    def test_live_deadline_returns_before_slow_fetch_finishes(self):
+        from ktc.live_retrieval import LiveDeadline, run_io_tasks
+
+        deadline = LiveDeadline(0.25)
+        release = threading.Event()
+
+        def slow():
+            release.wait(timeout=5)
+            return "too-late"
+
+        started = time.monotonic()
+        results = run_io_tasks([slow, slow], max_workers=2, deadline=deadline)
+        elapsed = time.monotonic() - started
+        release.set()
+        self.assertLess(elapsed, 1.5)
+        self.assertTrue(all(item is None for item in results))
 
 
 class TestLiveSummarize(unittest.TestCase):
@@ -881,7 +959,10 @@ class TestLiveSummarize(unittest.TestCase):
         ]
         config = LiveRetrievalConfig(summarize_backend="extractive", results_per_query=1)
         with mock.patch.dict(os.environ, {"LLM_API_KEY": ""}, clear=False):
-            with mock.patch("ktc.live_summarize.enrich_search_result", side_effect=lambda r, **k: r):
+            with mock.patch(
+                "ktc.live_summarize.enrich_search_results",
+                side_effect=lambda results, config, **k: list(results),
+            ):
                 sentences = summarize_search_results(
                     "IPC Section 376 rape India", results, config
                 )
@@ -999,6 +1080,35 @@ class TestLiveKnowledge(unittest.TestCase):
         self.assertNotIn("mon - sat", joined)
         self.assertTrue(candidates)
         self.assertTrue(all(c.triplet is not None for c in candidates))
+
+    def test_fetch_live_knowledge_respects_time_budget(self):
+        from ktc.query_builder import SearchQuery
+
+        release = threading.Event()
+
+        def slow_search(*args, **kwargs):
+            release.wait(timeout=5)
+            return []
+
+        config = LiveRetrievalConfig(
+            enable_live_retrieval=True,
+            max_live_queries_per_dialogue=3,
+            max_concurrent_queries=3,
+            max_live_retrieval_seconds=0.3,
+        )
+        queries = [
+            SearchQuery("q1", "rape", "crime", "crime_report_india"),
+            SearchQuery("q2", "rape", "crime", "crime_statute_indiacode"),
+            SearchQuery("q3", "helpline", "mental_health", "mh_crisis_helpline"),
+        ]
+        started = time.monotonic()
+        with mock.patch("ktc.live_knowledge.search_allowlisted", side_effect=slow_search):
+            with mock.patch("ktc.live_knowledge.build_queries", return_value=queries):
+                with mock.patch("ktc.live_knowledge.extract_entities", return_value=[]):
+                    fetch_live_knowledge("urgent rape help", config, ApiCallBudget(10), enabled=True)
+        elapsed = time.monotonic() - started
+        release.set()
+        self.assertLess(elapsed, 1.5)
 
     def test_static_candidates_from_triplets(self):
         t = Triplet("victim", "can file", "complaint")
@@ -1261,6 +1371,57 @@ class TestNltkSetup(unittest.TestCase):
         self.assertIn("scripts/setup_nltk.py", setup_command())
 
 
+class TestFinalKnowledgeText(unittest.TestCase):
+    def test_empty_verbalized_uses_supplemental_facts(self):
+        from ktc.pipeline import assemble_final_knowledge_text
+
+        facts = [
+            KnowledgeCandidate(
+                text="Clinical fact one about KIRAN 1800-599-0019.",
+                source="counseling_bank",
+                domain="clinical",
+            ),
+            KnowledgeCandidate(
+                text="Legal fact two about filing an FIR.",
+                source="counseling_bank",
+                domain="legal",
+            ),
+            KnowledgeCandidate(
+                text="Clinical fact three about iCall 9152987821.",
+                source="counseling_bank",
+                domain="clinical",
+            ),
+        ]
+        text, sources = assemble_final_knowledge_text([], facts)
+        self.assertIn("KIRAN 1800-599-0019", text)
+        self.assertIn("FIR", text)
+        self.assertIn("9152987821", text)
+        self.assertEqual(sources, ["supplemental_counseling"])
+
+    def test_non_overlapping_supplemental_is_appended(self):
+        from ktc.pipeline import assemble_final_knowledge_text
+
+        verbalized = ["Community centres run evening support groups."]
+        facts = [
+            KnowledgeCandidate(
+                text="KIRAN, the national mental health helpline 1800-599-0019, offers 24x7 distress support in India.",
+                source="counseling_bank",
+                domain="clinical",
+            ),
+        ]
+        text, sources = assemble_final_knowledge_text(verbalized, facts)
+        self.assertIn("Community centres", text)
+        self.assertIn("1800-599-0019", text)
+        self.assertEqual(sources, ["verbalized", "supplemental_counseling"])
+
+    def test_both_empty_yields_empty_string(self):
+        from ktc.pipeline import assemble_final_knowledge_text
+
+        text, sources = assemble_final_knowledge_text([], [])
+        self.assertEqual(text, "")
+        self.assertEqual(sources, [])
+
+
 class TestPipelineIntegration(unittest.TestCase):
     def _passthrough_ranker(self):
         from ktc.ranking import CandidateRankingResult
@@ -1354,6 +1515,8 @@ class TestPipelineIntegration(unittest.TestCase):
         )
         self.assertEqual(result.verbalized, [])
         self.assertTrue(result.no_passages_used)
+        self.assertEqual(result.final_knowledge_text, "")
+        self.assertEqual(result.final_knowledge_sources, [])
 
     def test_off_topic_blob_yields_no_static_when_gate_fails(self):
         from ktc.ranking import CandidateRankingResult
@@ -1384,6 +1547,9 @@ class TestPipelineIntegration(unittest.TestCase):
         extra = " ".join(c.text.lower() for c in result.supplemental_counseling)
         self.assertRegex(extra, r"112|police|murder|intimidation")
         self.assertFalse(any(c.source == "counseling_bank" for c in result.ranked_candidates))
+        self.assertTrue(result.final_knowledge_text)
+        self.assertIn("supplemental_counseling", result.final_knowledge_sources)
+        self.assertRegex(result.final_knowledge_text.lower(), r"112|police|murder|intimidation")
 
     def test_dying_turn_covers_legal_and_clinical(self):
         from ktc.ranking import CandidateRankingResult

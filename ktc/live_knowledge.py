@@ -13,7 +13,7 @@ from ktc.extraction import extract_triplets
 from ktc.filtering import filter_triplets
 from ktc.knowledge_item import KnowledgeCandidate
 from ktc.live_config import ApiCallBudget, LiveRetrievalConfig
-from ktc.live_retrieval import search_allowlisted
+from ktc.live_retrieval import LiveDeadline, run_io_tasks, search_allowlisted
 from ktc.live_summarize import LiveKnowledgeSentence, is_scraped_boilerplate, summarize_search_results
 from ktc.query_builder import SearchQuery, build_queries
 
@@ -69,20 +69,43 @@ def fetch_live_knowledge(
     )
     logger.info("live queries=%s", [q.text for q in queries])
 
-    candidates: List[KnowledgeCandidate] = []
-    all_live_sentences: List[LiveKnowledgeSentence] = []
+    deadline = LiveDeadline(config.max_live_retrieval_seconds)
 
-    for query in queries:
-        results = search_allowlisted(query.text, config, budget=budget)
+    def _run_query(query: SearchQuery) -> List[LiveKnowledgeSentence]:
+        if deadline.expired():
+            deadline.warn_if_expired()
+            return []
+        results = search_allowlisted(query.text, config, budget=budget, deadline=deadline)
         logger.info(
             "live hits query=%r allowlisted=%s",
             query.text,
             [r.url for r in results],
         )
-        live_sentences = summarize_search_results(query.text, results, config, budget=budget)
-        all_live_sentences.extend(live_sentences)
-        candidates.extend(_triplet_candidates_from_live(live_sentences, nlp=nlp))
+        return summarize_search_results(
+            query.text, results, config, budget=budget, deadline=deadline
+        )
 
+    sentence_batches = run_io_tasks(
+        [lambda q=query: _run_query(q) for query in queries],
+        max_workers=config.max_concurrent_queries,
+        deadline=deadline,
+    )
+
+    candidates: List[KnowledgeCandidate] = []
+    all_live_sentences: List[LiveKnowledgeSentence] = []
+    for batch in sentence_batches:
+        if not batch:
+            continue
+        all_live_sentences.extend(batch)
+        candidates.extend(_triplet_candidates_from_live(batch, nlp=nlp))
+
+    logger.info(
+        "live_retrieval_elapsed elapsed=%.1fs queries=%d sentences=%d candidates=%d",
+        deadline.elapsed(),
+        len(queries),
+        len(all_live_sentences),
+        len(candidates),
+    )
     return candidates, queries, all_live_sentences
 
 

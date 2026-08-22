@@ -28,3 +28,21 @@ llm_api_base: https://api.groq.com/openai/v1
 
 # Estimated USD cost per dialogue at default limits (for planning; update if pricing changes).
 estimated_cost_per_dialogue_usd: 0.03
+
+# Page fetch timeout in seconds (indiacode.nic.in and similar often stall).
+page_fetch_timeout: 8
+
+# Tavily/SerpAPI HTTP timeout in seconds.
+search_timeout: 10
+
+# Skip re-fetching URLs that failed recently (timeouts, 4xx/5xx, connection errors).
+failure_cache_ttl_days: 1
+
+# Concurrent page fetches within one query's result set.
+max_concurrent_fetches: 4
+
+# Concurrent search queries within one turn.
+max_concurrent_queries: 3
+
+# Hard wall-clock cap for live retrieval on one dialogue turn (seconds).
+max_live_retrieval_seconds: 20

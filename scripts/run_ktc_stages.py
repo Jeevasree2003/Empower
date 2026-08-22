@@ -95,6 +95,9 @@ def print_demo(dialogue: dict, history: str, result: dict, turn: int) -> None:
     _print_stage("STAGE 2  Live retrieval → OpenIE triplets → verbalize")
     live = result.get("live_knowledge") or {}
     print(f"live_enabled: {live.get('enabled')}")
+    elapsed = live.get("elapsed_seconds")
+    if elapsed is not None:
+        print(f"live_retrieval_elapsed_seconds: {elapsed:.2f}")
     live_sents = live.get("verbalized") or []
     if not live.get("enabled"):
         print("  live off (default). Re-run with --enable-live to fetch allowlisted pages.")
@@ -128,6 +131,18 @@ def print_demo(dialogue: dict, history: str, result: dict, turn: int) -> None:
         print("  (empty — no ranked/supplemental candidates to synthesize)")
     else:
         print(synthesized)
+
+    _print_stage("STAGE 6  final_knowledge_text (KT for training / response generation)")
+    sources = result.get("final_knowledge_sources") or []
+    if not sources:
+        print("sources: (none — empty-knowledge turn)")
+    else:
+        print("sources: " + " + ".join(sources))
+    final_text = result.get("final_knowledge_text") or ""
+    if not final_text.strip():
+        print("  (empty)")
+    else:
+        print(final_text)
 
 
 def main() -> None:

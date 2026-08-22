@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import re
+import time
 from dataclasses import dataclass, field, replace
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from ktc.coreference import resolve_coreferences
 from ktc.counseling_bank import (
@@ -45,6 +46,65 @@ _SCAM_NOISE = re.compile(
     re.I,
 )
 _VIOLENCE_HINT = re.compile(r"\b(murder|kill|rape|assault|drowning|intimidation)\b", re.I)
+_CLINICAL_IN_TEXT = re.compile(
+    r"\b(helpline|kiran|icall|distress|counsel|112\b|mental health|suicide)\b",
+    re.I,
+)
+_LEGAL_IN_TEXT = re.compile(
+    r"\b(fir|police|section|ipc|crpc|nalsa|181\b|pwdva|posh|legal aid|cognizable)\b",
+    re.I,
+)
+
+
+def _normalize_sentence(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip().lower()).rstrip(".!?")
+
+
+def _domain_represented(verbalized: Sequence[str], domain: Optional[str]) -> bool:
+    blob = " ".join(verbalized)
+    if domain == DOMAIN_CLINICAL:
+        return bool(_CLINICAL_IN_TEXT.search(blob))
+    if domain == DOMAIN_LEGAL:
+        return bool(_LEGAL_IN_TEXT.search(blob))
+    return False
+
+
+def assemble_final_knowledge_text(
+    verbalized: Sequence[str],
+    supplemental: Sequence[KnowledgeCandidate],
+) -> Tuple[str, List[str]]:
+    """KT for training/response generation: gated OpenIE plus missing-domain bank facts."""
+    sentences: List[str] = []
+    sources: List[str] = []
+    seen = set()
+
+    def add(text: str, source: str) -> None:
+        raw = (text or "").strip()
+        if not raw:
+            return
+        key = _normalize_sentence(raw)
+        if not key or key in seen:
+            return
+        seen.add(key)
+        if raw[-1] not in ".!?":
+            raw += "."
+        sentences.append(raw)
+        if source not in sources:
+            sources.append(source)
+
+    for sentence in verbalized:
+        add(sentence, "verbalized")
+
+    if verbalized:
+        for fact in supplemental:
+            if fact.domain and _domain_represented(verbalized, fact.domain):
+                continue
+            add(fact.text, "supplemental_counseling")
+    else:
+        for fact in supplemental:
+            add(fact.text, "supplemental_counseling")
+
+    return " ".join(sentences), sources
 
 
 @dataclass
@@ -66,6 +126,9 @@ class HybridRunResult:
     victim_span: str = ""
     supplemental_counseling: List[KnowledgeCandidate] = field(default_factory=list)
     synthesized_knowledge: Optional[str] = None
+    final_knowledge_text: str = ""
+    final_knowledge_sources: List[str] = field(default_factory=list)
+    live_elapsed_seconds: Optional[float] = None
 
 
 @dataclass
@@ -255,8 +318,10 @@ class KnowledgeTripletPipeline:
         )
         pool = static_candidates_from_triplets(filtered)
         live_on = self.live_config.enable_live_retrieval if enable_live is None else enable_live
+        live_elapsed_seconds = None
 
         if live_on:
+            started = time.monotonic()
             live_candidates, constructed, _raw = fetch_live_knowledge(
                 victim_span,
                 self.live_config,
@@ -264,6 +329,7 @@ class KnowledgeTripletPipeline:
                 nlp=nlp,
                 enabled=True,
             )
+            live_elapsed_seconds = time.monotonic() - started
             pool.extend(live_candidates)
 
         rank_text = query or dialog_history
@@ -308,6 +374,9 @@ class KnowledgeTripletPipeline:
                 model=self.synthesis_model,
                 llm_config=self.live_config,
             )
+        final_knowledge_text, final_sources = assemble_final_knowledge_text(
+            verbalized, supplemental
+        )
         return HybridRunResult(
             verbalized=verbalized,
             top1_similarity_score=top1_score,
@@ -326,6 +395,9 @@ class KnowledgeTripletPipeline:
             victim_span=victim_span,
             supplemental_counseling=supplemental,
             synthesized_knowledge=synthesized_knowledge,
+            final_knowledge_text=final_knowledge_text,
+            final_knowledge_sources=final_sources,
+            live_elapsed_seconds=live_elapsed_seconds,
         )
 
     def run_raw_knowledge(self, knowledge_text: str) -> List[str]:
@@ -351,6 +423,9 @@ class KnowledgeTripletPipeline:
             "query_field_note": (
                 "verbalized is Stage 2e over OpenIE triplets from gated KARE passages and live pages. "
                 "supplemental_counseling is trigger-matched local facts and is not mixed into verbalized. "
+                "final_knowledge_text is the KT for training/response generation: verbalized, plus "
+                "supplemental facts whose domain is missing from verbalized (or supplemental alone "
+                "when verbalized is empty). "
                 "synthesized_knowledge is LLM-3 evidence synthesis over ranked + supplemental candidates; "
                 "it is null unless inspect/run_hybrid is called with synthesize=True. "
                 "Live ranked_candidates[].query is the Tavily search string; it is null/absent on static triplets."
@@ -369,12 +444,15 @@ class KnowledgeTripletPipeline:
             "live_knowledge": {
                 "enabled": hybrid.live_enabled,
                 "verbalized": hybrid.live_verbalized,
+                "elapsed_seconds": hybrid.live_elapsed_seconds,
             },
             "counseling_bank_used": hybrid.counseling_bank_used,
             "supplemental_counseling": [c.to_dict() for c in hybrid.supplemental_counseling],
             "reply_knowledge": hybrid.verbalized,
             "verbalized": hybrid.verbalized,
             "synthesized_knowledge": hybrid.synthesized_knowledge,
+            "final_knowledge_text": hybrid.final_knowledge_text,
+            "final_knowledge_sources": hybrid.final_knowledge_sources,
             "module_knowledge": module_knowledge,
             "ranked_candidates": [c.to_dict() for c in hybrid.ranked_candidates],
             "top1_similarity_score": hybrid.top1_similarity_score,

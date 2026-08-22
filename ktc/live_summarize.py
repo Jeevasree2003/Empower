@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 from ktc.live_config import ApiCallBudget, LiveRetrievalConfig
-from ktc.live_retrieval import SearchResult, enrich_search_result
+from ktc.live_retrieval import SearchResult, enrich_search_results
 
 logger = logging.getLogger(__name__)
 
@@ -222,6 +222,7 @@ def summarize_search_results(
     results: List[SearchResult],
     config: LiveRetrievalConfig,
     budget: Optional[ApiCallBudget] = None,
+    deadline=None,
 ) -> List[LiveKnowledgeSentence]:
     """Turn allowlisted search hits into factual sentences. Never raises.
 
@@ -246,21 +247,22 @@ def summarize_search_results(
             client = None
 
     attributed: List[LiveKnowledgeSentence] = []
+    sliced = results[: config.results_per_query]
+    enriched_results = enrich_search_results(sliced, config, deadline=deadline)
 
-    for result in results[: config.results_per_query]:
+    for result, enriched in zip(sliced, enriched_results):
+        if deadline is not None and deadline.expired():
+            break
         try:
-            enriched = enrich_search_result(result, cache_ttl_days=config.cache_ttl_days)
             sentences: List[str] = []
             if use_llm and client is not None:
-                if budget is not None and not budget.can_call():
+                if budget is not None and not budget.record(1):
                     logger.warning(
                         "API call budget exhausted; extractive fallback for query=%r", query
                     )
                     sentences = extractive_sentences(query, enriched.snippet)
                 else:
                     try:
-                        if budget is not None:
-                            budget.record(1)
                         sentences = _summarize_one_source(query, enriched, config, client)
                     except Exception as exc:
                         logger.warning(
