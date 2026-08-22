@@ -12,7 +12,7 @@ from ktc.knowledge_item import KnowledgeCandidate
 from ktc.triplet import Triplet
 
 MIN_COSINE = 0.38
-MAX_RANKED = 8
+MAX_RANKED = 16
 
 
 @dataclass

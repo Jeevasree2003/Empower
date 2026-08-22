@@ -110,6 +110,7 @@ def print_demo(dialogue: dict, history: str, result: dict, turn: int) -> None:
             "knowledge_funnel "
             f"live_sentences={funnel.get('live_sentences')} "
             f"live_triplets={funnel.get('live_triplets')} "
+            f"live_sentences_used_directly={funnel.get('live_sentences_used_directly')} "
             f"live_sentence_relevance={funnel.get('live_sentence_relevance')} "
             f"static_triplets={funnel.get('static_triplets')} "
             f"gate_passed={funnel.get('gate_passed')} "

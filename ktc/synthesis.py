@@ -12,7 +12,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from typing import List, Sequence, Set
+from typing import List, Sequence, Set, Tuple
 
 from ktc.knowledge_item import KnowledgeCandidate
 from ktc.verbalization import _make_llm_client
@@ -36,6 +36,61 @@ _SECTION_RE = re.compile(
     re.IGNORECASE,
 )
 _NAMED_ANCHORS_RE = re.compile(r"\b(?:kiran|icall|nalsa|tiss)\b", re.IGNORECASE)
+_HYPHEN_TRANSLATE = str.maketrans(
+    {
+        "\u2010": "-",
+        "\u2011": "-",
+        "\u2012": "-",
+        "\u2013": "-",
+        "\u2014": "-",
+    }
+)
+_CONTENT_STOPWORDS = frozenset(
+    {
+        "the",
+        "a",
+        "an",
+        "and",
+        "or",
+        "of",
+        "to",
+        "for",
+        "in",
+        "on",
+        "at",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "being",
+        "this",
+        "that",
+        "with",
+        "from",
+        "by",
+        "as",
+        "if",
+        "you",
+        "your",
+        "can",
+        "may",
+        "must",
+        "not",
+        "do",
+        "does",
+        "will",
+        "would",
+        "should",
+        "have",
+        "has",
+        "had",
+        "it",
+        "its",
+    }
+)
+_CONTENT_COVER_RATIO = 0.55
 _META_PREFIXES = (
     "note:",
     "here is",
@@ -95,8 +150,12 @@ def _concat_candidates(candidates: Sequence[KnowledgeCandidate]) -> str:
     return " ".join(parts)
 
 
+def _normalize_grounding_text(text: str) -> str:
+    return (text or "").translate(_HYPHEN_TRANSLATE)
+
+
 def _numbers_in(text: str) -> Set[str]:
-    return set(_NUMBER_RE.findall(text or ""))
+    return set(_NUMBER_RE.findall(_normalize_grounding_text(text)))
 
 
 def novel_numbers(passage: str, source_text: str) -> Set[str]:
@@ -106,34 +165,89 @@ def novel_numbers(passage: str, source_text: str) -> Set[str]:
 
 def grounding_tokens(text: str) -> Set[str]:
     """Phone digits, IPC/section references, and helpline names used for coverage checks."""
-    found: Set[str] = set(_numbers_in(text))
-    for match in _SECTION_RE.finditer(text or ""):
+    normalized = _normalize_grounding_text(text)
+    found: Set[str] = {number for number in _numbers_in(normalized) if len(number) >= 3}
+    for match in _SECTION_RE.finditer(normalized):
         code = (match.group("code") or "").lower()
         if code:
             found.add(code)
-    for match in _NAMED_ANCHORS_RE.finditer(text or ""):
+    for match in _NAMED_ANCHORS_RE.finditer(normalized):
         found.add(match.group(0).lower())
     return found
 
 
-def coverage_gap_facts(passage: str, candidates: Sequence[KnowledgeCandidate]) -> List[str]:
-    """Return candidate texts whose grounding tokens are entirely absent from ``passage``."""
+def _content_words(text: str) -> List[str]:
+    words = re.findall(r"[a-z0-9]+", _normalize_grounding_text(text).lower())
+    return [word for word in words if word not in _CONTENT_STOPWORDS and len(word) > 2]
+
+
+def candidate_is_covered(passage: str, fact: str) -> bool:
+    """True when this candidate's distinctive tokens, or tokenless key content, appear in ``passage``."""
+    fact = (fact or "").strip()
+    if not fact:
+        return True
+    fact_tokens = grounding_tokens(fact)
     passage_tokens = grounding_tokens(passage)
-    gaps: List[str] = []
-    for item in candidates:
+    if fact_tokens:
+        return fact_tokens <= passage_tokens
+    words = list(dict.fromkeys(_content_words(fact)))
+    if not words:
+        return True
+    passage_lower = _normalize_grounding_text(passage).lower()
+    hits = sum(1 for word in words if word in passage_lower)
+    return hits / len(words) >= _CONTENT_COVER_RATIO
+
+
+def completeness_report(
+    passage: str, candidates: Sequence[KnowledgeCandidate]
+) -> List[Tuple[int, bool, str]]:
+    """Per-candidate coverage: ``(index, covered, text_preview)``."""
+    rows: List[Tuple[int, bool, str]] = []
+    for index, item in enumerate(candidates):
         fact = re.sub(r"\s+", " ", (item.text or "").strip())
-        tokens = grounding_tokens(fact)
-        if tokens and tokens.isdisjoint(passage_tokens):
-            gaps.append(fact)
+        preview = fact if len(fact) <= 120 else fact[:117] + "..."
+        covered = candidate_is_covered(passage, fact)
+        rows.append((index, covered, preview))
+    return rows
+
+
+def coverage_gap_facts(passage: str, candidates: Sequence[KnowledgeCandidate]) -> List[str]:
+    """Return candidate texts that are not covered by ``passage``."""
+    gaps: List[str] = []
+    for index, covered, _preview in completeness_report(passage, candidates):
+        if covered:
+            continue
+        gaps.append(re.sub(r"\s+", " ", (candidates[index].text or "").strip()))
     return gaps
+
+
+def log_completeness_check(passage: str, candidates: Sequence[KnowledgeCandidate]) -> List[int]:
+    """Log per-candidate coverage against the LLM response. Returns missing indices."""
+    missing: List[int] = []
+    for index, covered, preview in completeness_report(passage, candidates):
+        logger.info(
+            "completeness_check candidate=%s covered=%s text_preview=%r",
+            index,
+            covered,
+            preview,
+        )
+        if not covered:
+            missing.append(index)
+            logger.warning("synthesis_coverage_gap missing_fact=%r", preview)
+    if missing:
+        logger.warning(
+            "synthesis completeness check failed; missing_indices=%s; falling back to concatenated evidence",
+            missing,
+        )
+    return missing
 
 
 def log_coverage_gaps(passage: str, candidates: Sequence[KnowledgeCandidate]) -> List[str]:
-    """Warn when a candidate's distinctive tokens never appear in the synthesized passage."""
-    gaps = coverage_gap_facts(passage, candidates)
-    for fact in gaps:
-        logger.warning("synthesis_coverage_gap missing_fact=%r", fact)
-    return gaps
+    """Warn when a candidate's distinctive content never appears in the synthesized passage."""
+    missing = log_completeness_check(passage, candidates)
+    return [
+        re.sub(r"\s+", " ", (candidates[index].text or "").strip()) for index in missing
+    ]
 
 
 def _approx_tokens(text: str) -> int:
@@ -274,5 +388,7 @@ def synthesize_evidence(
         len(passage),
         _approx_tokens(passage),
     )
-    log_coverage_gaps(passage, items)
+    missing = log_completeness_check(passage, items)
+    if missing:
+        return SynthesisResult(text=fallback, used_llm=False)
     return SynthesisResult(text=passage, used_llm=True)

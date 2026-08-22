@@ -387,7 +387,7 @@ class KnowledgeTripletPipeline:
         live_verbalized = [
             sentence
             for candidate, sentence in zip(ranked, verbalized)
-            if candidate.source == "live_api"
+            if candidate.source in {"live_api", "live_sentence_direct"}
         ]
         synthesized_knowledge = None
         if synthesize:
@@ -420,23 +420,31 @@ class KnowledgeTripletPipeline:
         verbalized_keys = {_normalize_sentence(text) for text in verbalized}
         for page in live_pages:
             made = []
-            for text in (page.get("openie_texts") or []) + (page.get("sentence_relevance_texts") or []):
+            for text in (
+                (page.get("openie_texts") or [])
+                + (page.get("sentence_relevance_texts") or [])
+                + (page.get("direct_texts") or [])
+            ):
                 if _normalize_sentence(text) in verbalized_keys:
                     made.append(text)
             page["made_verbalized"] = made
         funnel = {
             "live_sentences": (live_funnel.live_sentences if live_funnel else 0),
             "live_triplets": (live_funnel.live_triplets if live_funnel else 0),
+            "live_sentences_used_directly": (
+                live_funnel.live_sentences_used_directly if live_funnel else 0
+            ),
             "live_sentence_relevance": (live_funnel.live_sentence_relevance if live_funnel else 0),
             "static_triplets": len(filtered or []),
             "gate_passed": len(ranked),
             "final_verbalized_count": len(verbalized),
         }
         logger.info(
-            "knowledge_funnel live_sentences=%s live_triplets=%s live_sentence_relevance=%s "
-            "static_triplets=%s gate_passed=%s final_verbalized_count=%s",
+            "knowledge_funnel live_sentences=%s live_triplets=%s live_sentences_used_directly=%s "
+            "live_sentence_relevance=%s static_triplets=%s gate_passed=%s final_verbalized_count=%s",
             funnel["live_sentences"],
             funnel["live_triplets"],
+            funnel["live_sentences_used_directly"],
             funnel["live_sentence_relevance"],
             funnel["static_triplets"],
             funnel["gate_passed"],

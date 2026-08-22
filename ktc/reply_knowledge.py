@@ -51,7 +51,9 @@ def is_ktc_usable(candidate: KnowledgeCandidate) -> bool:
         return False
     if _ANECDOTE.search(text):
         return False
-    if candidate.source == "live_api" and re.search(r"\[\.+\.\.\]|is not rape|^--", text, re.I):
+    if candidate.source in {"live_api", "live_sentence_direct"} and re.search(
+        r"\[\.+\.\.\]|is not rape|^--", text, re.I
+    ):
         return False
     return True
 
@@ -69,9 +71,11 @@ def is_reply_usable(candidate: KnowledgeCandidate) -> bool:
         return bool(_GROUNDED_FACT.search(text) or _PHONE.search(text)) and not _ANECDOTE.search(text)
     if _ANECDOTE.search(text):
         return False
-    if candidate.source == "live_api":
+    if candidate.source == "live_api" or candidate.source == "live_sentence_direct":
         if re.search(r"\[\.+\.\.\]|is not rape|^--", text, re.I):
             return False
+        if candidate.source == "live_sentence_direct":
+            return True
         return bool(_GROUNDED_FACT.search(text) or _PHONE.search(text))
     return bool(_GROUNDED_FACT.search(text) or _PHONE.search(text))
 

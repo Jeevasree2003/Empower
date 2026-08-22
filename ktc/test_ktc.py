@@ -407,11 +407,9 @@ class TestEvidenceSynthesis(unittest.TestCase):
             gaps = log_coverage_gaps(passage, candidates)
         self.assertEqual(len(gaps), 1)
         self.assertIn("9152987821", gaps[0])
-        mock_logger.warning.assert_called()
-        log_msg = mock_logger.warning.call_args[0][0]
-        log_fact = mock_logger.warning.call_args[0][1]
-        self.assertEqual(log_msg, "synthesis_coverage_gap missing_fact=%r")
-        self.assertIn("9152987821", log_fact)
+        warning_messages = [call.args[0] for call in mock_logger.warning.call_args_list]
+        self.assertTrue(any("synthesis_coverage_gap" in msg for msg in warning_messages))
+        self.assertTrue(any("9152987821" in str(call.args) for call in mock_logger.warning.call_args_list))
 
     def test_coverage_gap_silent_when_all_tokens_present(self):
         from ktc.synthesis import log_coverage_gaps
@@ -457,8 +455,57 @@ class TestEvidenceSynthesis(unittest.TestCase):
                 with self.assertLogs("ktc.synthesis", level="WARNING") as captured:
                     result = synthesize_evidence(candidates, "user: I am going insane.")
 
-        self.assertTrue(result.used_llm)
+        self.assertFalse(result.used_llm)
+        self.assertIn("9152987821", result.text)
         self.assertTrue(any("synthesis_coverage_gap" in line and "9152987821" in line for line in captured.output))
+        self.assertTrue(any("falling back to concatenated evidence" in line for line in captured.output))
+
+    @mock.patch("ktc.synthesis._make_llm_client")
+    def test_incomplete_llm_output_falls_back_and_reports_missing_indices(self, mock_make_client):
+        from ktc.synthesis import completeness_report, synthesize_evidence
+
+        candidates = [
+            KnowledgeCandidate(text="KIRAN, the national mental health helpline 1800-599-0019, offers 24x7 distress support in India.", source="counseling_bank"),
+            KnowledgeCandidate(text="A victim can file an FIR at the nearest police station.", source="static_dataset"),
+            KnowledgeCandidate(text="iCall psychosocial helpline 9152987821 provides confidential counseling for people in emotional distress.", source="counseling_bank"),
+            KnowledgeCandidate(text="Rape is a cognizable offence under IPC Section 376; a survivor can file an FIR and seek medical and legal aid without delay.", source="counseling_bank"),
+            KnowledgeCandidate(text="Gang rape is an aggravated offence under IPC Section 376D; a delayed FIR is still valid and a survivor can request a medical examination and police protection.", source="counseling_bank"),
+            KnowledgeCandidate(text="You do not have to file a police case before getting emotional support; 181 or NALSA legal aid can help if you later need legal information or protection.", source="counseling_bank"),
+            KnowledgeCandidate(text="You can ask for help even if you are not sure what the problem is called; a counselor can listen first.", source="counseling_bank"),
+            KnowledgeCandidate(text="iCall psychosocial helpline, Tata Institute of Social Sciences, offers telephone counseling services.", source="live_sentence_direct"),
+        ]
+        trimmed = (
+            "KIRAN, the national mental health helpline 1800-599-0019, offers 24x7 distress support in India. "
+            "A victim can file an FIR at the nearest police station. "
+            "iCall psychosocial helpline 9152987821 provides confidential counseling for people in emotional distress. "
+            "Rape is a cognizable offence under IPC Section 376; a survivor can file an FIR and seek medical and legal aid without delay. "
+            "iCall psychosocial helpline, Tata Institute of Social Sciences, offers telephone counseling services."
+        )
+        report = completeness_report(trimmed, candidates)
+        missing = [index for index, covered, _preview in report if not covered]
+        self.assertEqual(missing, [4, 5, 6])
+
+        mock_client = mock.Mock()
+        mock_response = mock.Mock()
+        mock_response.choices = [mock.Mock(message=mock.Mock(content=trimmed))]
+        mock_client.chat.completions.create.return_value = mock_response
+        mock_make_client.return_value = (mock_client, LiveRetrievalConfig())
+
+        fake_openai = mock.Mock()
+        with mock.patch.dict(os.environ, {"LLM_API_KEY": "ollama"}):
+            with mock.patch.dict(sys.modules, {"openai": fake_openai}):
+                with self.assertLogs("ktc.synthesis", level="INFO") as captured:
+                    result = synthesize_evidence(candidates, "victim: I was gang raped and need help.")
+
+        self.assertFalse(result.used_llm)
+        self.assertIn("376D", result.text)
+        self.assertIn("NALSA", result.text)
+        self.assertIn("listen first", result.text)
+        joined_logs = "\n".join(captured.output)
+        self.assertIn("completeness_check candidate=4 covered=False", joined_logs)
+        self.assertIn("completeness_check candidate=5 covered=False", joined_logs)
+        self.assertIn("completeness_check candidate=6 covered=False", joined_logs)
+        self.assertIn("missing_indices=[4, 5, 6]", joined_logs)
 
     def test_pipeline_synthesize_defaults_off(self):
         from ktc.pipeline import KnowledgeTripletPipeline
@@ -837,7 +884,8 @@ class TestLiveConfig(unittest.TestCase):
         self.assertEqual(config.max_live_retrieval_seconds, 20)
         self.assertEqual(config.max_concurrent_fetches, 4)
         self.assertEqual(config.max_concurrent_queries, 3)
-        self.assertEqual(config.live_sentence_top_k, 3)
+        self.assertEqual(config.live_sentence_candidates_per_page, 8)
+        self.assertEqual(config.live_sentence_top_k, 8)
 
 
 class TestLiveRetrieval(unittest.TestCase):
@@ -1306,6 +1354,74 @@ class TestLiveKnowledge(unittest.TestCase):
         self.assertIn("1800-599-0019", joined)
         self.assertNotIn("IIT Bombay", joined)
         self.assertTrue(all(c.extraction_method == "sentence_relevance" for c in candidates))
+
+    def test_openie_empty_keeps_live_sentence_direct_in_verbalized(self):
+        from ktc.live_knowledge import LiveFunnel, direct_sentence_candidates
+        from ktc.live_summarize import LivePageStats
+        from ktc.pipeline import KnowledgeTripletPipeline
+        from ktc.ranking import CandidateRankingResult
+
+        sentences = [
+            "iCALL is a psychosocial helpline that offers telephone counseling for people in emotional distress in India.",
+            "A rape survivor should be provided free medical treatment, psychological counselling, and legal aid by the state.",
+            "KIRAN is a 24x7 mental health helpline 1800-599-0019 operated for distress support in India.",
+            "Survivors can request a medical examination and police protection after reporting the offence to authorities.",
+            "Confidential counseling is available even if you are not sure what the problem is called by the counselor.",
+        ]
+        pages = [
+            LivePageStats(
+                url="https://icallhelpline.org/",
+                query="mental health helpline India",
+                sentences_extracted=5,
+                sentences=sentences,
+            )
+        ]
+
+        class _AllRelevantRanker:
+            model = None
+
+            def cosine_to_query(self, query, texts):
+                return [0.82] * len(list(texts))
+
+            def rank_candidates_with_scores(self, dialog_history, candidates, top_k=26):
+                cl = list(candidates)
+                scores = [0.9] * len(cl)
+                return CandidateRankingResult(cl[:top_k], scores[:top_k], 0.9 if cl else 0.0)
+
+        with mock.patch("ktc.live_knowledge.extract_triplets", return_value=[]):
+            extra_openie, direct = direct_sentence_candidates(
+                pages, [], _AllRelevantRanker(), nlp=None, min_cosine=0.38, top_k_per_page=8
+            )
+        self.assertEqual(extra_openie, [])
+        self.assertEqual(len(direct), 5)
+        self.assertTrue(all(c.source == "live_sentence_direct" for c in direct))
+
+        funnel = LiveFunnel(
+            live_sentences=5,
+            live_triplets=0,
+            live_sentence_relevance=5,
+            live_sentences_used_directly=5,
+        )
+        pipeline = KnowledgeTripletPipeline(
+            verbalization_backend="template",
+            coref_backend="heuristic",
+            ranker=_AllRelevantRanker(),
+            min_cosine=0.0,
+        )
+        with mock.patch(
+            "ktc.pipeline.fetch_live_knowledge",
+            return_value=(direct, [], [], funnel),
+        ):
+            result = pipeline.run_hybrid(
+                "",
+                "agent: Hi. victim: I was raped and I need a helpline and legal aid.",
+                enable_live=True,
+            )
+        self.assertGreaterEqual(len(result.verbalized), 1)
+        self.assertTrue(any(c.source == "live_sentence_direct" for c in result.ranked_candidates))
+        blob = " ".join(result.verbalized).lower()
+        self.assertTrue("helpline" in blob or "legal aid" in blob)
+        self.assertEqual(result.knowledge_funnel["live_sentences_used_directly"], 5)
 
     def test_dedup_openie_and_sentence_relevance(self):
         from ktc.live_knowledge import dedup_candidates
@@ -1788,6 +1904,7 @@ class TestPipelineIntegration(unittest.TestCase):
         self.assertIn("static_triplets=", funnel_lines[0])
         self.assertIn(f"final_verbalized_count={len(result.verbalized)}", funnel_lines[0])
         self.assertIn("live_sentences=0", funnel_lines[0])
+        self.assertIn("live_sentences_used_directly=0", funnel_lines[0])
 
     def test_off_topic_blob_yields_no_static_when_gate_fails(self):
         from ktc.ranking import CandidateRankingResult
