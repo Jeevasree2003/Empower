@@ -401,7 +401,7 @@ class KnowledgeTripletPipeline:
                 evidence,
                 dialog_history,
                 backend="llm",
-                model=self.synthesis_model,
+                model=self.live_config.llm_model or self.synthesis_model,
                 llm_config=self.live_config,
             )
             synthesized_knowledge = synthesis.text

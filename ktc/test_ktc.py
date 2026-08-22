@@ -341,7 +341,7 @@ class TestEvidenceSynthesis(unittest.TestCase):
         call_kwargs = mock_client.chat.completions.create.call_args.kwargs
         self.assertEqual(call_kwargs["model"], DEFAULT_SYNTHESIS_MODEL)
         self.assertEqual(call_kwargs["temperature"], 0)
-        self.assertEqual(call_kwargs["max_tokens"], 300)
+        self.assertEqual(call_kwargs["max_tokens"], 1024)
         self.assertIn("1800-599-0019", call_kwargs["messages"][1]["content"])
 
     @mock.patch("ktc.synthesis._make_llm_client")
