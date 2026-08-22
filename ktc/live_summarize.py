@@ -8,6 +8,7 @@ import re
 from dataclasses import dataclass, field
 from typing import List, Optional
 
+from ktc.cleaning import strip_legal_citations
 from ktc.live_config import ApiCallBudget, LiveRetrievalConfig
 from ktc.live_retrieval import SearchResult, enrich_search_results
 
@@ -113,7 +114,7 @@ def split_live_sentences(text: str) -> List[str]:
     selected: List[str] = []
     seen = set()
     for raw in _SENTENCE_SPLIT.split(re.sub(r"\s+", " ", text.strip())):
-        line = raw.strip()
+        line = strip_legal_citations(raw.strip())
         if len(line) < 40 or len(line) > 420:
             continue
         if _NAV_FOOTER.search(line) or _is_broken_live_sentence(line) or _is_meta_commentary(line):
@@ -204,6 +205,9 @@ def _parse_sentences(raw: str) -> List[str]:
         if _is_meta_commentary(line) or _is_broken_live_sentence(line) or is_scraped_boilerplate(line):
             continue
         if _NON_COUNSELOR_PROSE.search(line):
+            continue
+        line = strip_legal_citations(line)
+        if not line:
             continue
         if len(line) > 20 or _is_short_fact(line):
             lines.append(line)

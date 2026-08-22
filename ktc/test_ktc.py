@@ -298,21 +298,23 @@ class TestEvidenceSynthesis(unittest.TestCase):
     def test_llm_falls_back_to_concatenation_without_api_key(self):
         from ktc.synthesis import synthesize_evidence
 
-        passage = synthesize_evidence(self._candidates(), "user: I am going insane.")
-        self.assertIn("1800-599-0019", passage)
-        self.assertIn("FIR", passage)
-        self.assertIn("KIRAN", passage)
+        result = synthesize_evidence(self._candidates(), "user: I am going insane.")
+        self.assertFalse(result.used_llm)
+        self.assertIn("1800-599-0019", result.text)
+        self.assertIn("FIR", result.text)
+        self.assertIn("KIRAN", result.text)
 
     def test_template_backend_concatenates(self):
         from ktc.synthesis import synthesize_evidence
 
-        passage = synthesize_evidence(
+        result = synthesize_evidence(
             self._candidates(),
             "user: I am going insane.",
             backend="template",
         )
-        self.assertTrue(passage.startswith("KIRAN"))
-        self.assertIn("police station", passage.lower())
+        self.assertFalse(result.used_llm)
+        self.assertTrue(result.text.startswith("KIRAN"))
+        self.assertIn("police station", result.text.lower())
 
     @mock.patch("ktc.synthesis._make_llm_client")
     def test_llm_synthesis_uses_chat_api(self, mock_make_client):
@@ -331,9 +333,10 @@ class TestEvidenceSynthesis(unittest.TestCase):
         fake_openai = mock.Mock()
         with mock.patch.dict(os.environ, {"LLM_API_KEY": "ollama"}):
             with mock.patch.dict(sys.modules, {"openai": fake_openai}):
-                passage = synthesize_evidence(self._candidates(), "user: I am going insane.")
+                result = synthesize_evidence(self._candidates(), "user: I am going insane.")
 
-        self.assertEqual(passage, grounded if grounded.endswith(".") else grounded + ".")
+        self.assertTrue(result.used_llm)
+        self.assertEqual(result.text, grounded if grounded.endswith(".") else grounded + ".")
         mock_client.chat.completions.create.assert_called_once()
         call_kwargs = mock_client.chat.completions.create.call_args.kwargs
         self.assertEqual(call_kwargs["model"], DEFAULT_SYNTHESIS_MODEL)
@@ -357,11 +360,12 @@ class TestEvidenceSynthesis(unittest.TestCase):
         fake_openai = mock.Mock()
         with mock.patch.dict(os.environ, {"LLM_API_KEY": "ollama"}):
             with mock.patch.dict(sys.modules, {"openai": fake_openai}):
-                passage = synthesize_evidence(self._candidates(), "user: I am going insane.")
+                result = synthesize_evidence(self._candidates(), "user: I am going insane.")
 
-        self.assertNotIn("9152987821", passage)
-        self.assertIn("1800-599-0019", passage)
-        self.assertIn("FIR", passage)
+        self.assertFalse(result.used_llm)
+        self.assertNotIn("9152987821", result.text)
+        self.assertIn("1800-599-0019", result.text)
+        self.assertIn("FIR", result.text)
 
     @mock.patch("ktc.synthesis._make_llm_client")
     def test_malformed_output_falls_back(self, mock_make_client):
@@ -376,9 +380,10 @@ class TestEvidenceSynthesis(unittest.TestCase):
         fake_openai = mock.Mock()
         with mock.patch.dict(os.environ, {"LLM_API_KEY": "ollama"}):
             with mock.patch.dict(sys.modules, {"openai": fake_openai}):
-                passage = synthesize_evidence(self._candidates(), "user: help")
+                result = synthesize_evidence(self._candidates(), "user: help")
 
-        self.assertIn("KIRAN", passage)
+        self.assertFalse(result.used_llm)
+        self.assertIn("KIRAN", result.text)
 
     def test_pipeline_synthesize_defaults_off(self):
         from ktc.pipeline import KnowledgeTripletPipeline
@@ -431,6 +436,62 @@ class TestEvidenceSynthesis(unittest.TestCase):
                 synthesize=True,
             )
         self.assertIsNotNone(result.synthesized_knowledge)
+        self.assertNotEqual(result.final_knowledge_sources, ["llm_synthesis"])
+
+    def _passthrough_pipeline(self):
+        from ktc.pipeline import KnowledgeTripletPipeline
+        from ktc.ranking import CandidateRankingResult
+
+        class _PassthroughRanker:
+            model = None
+
+            def rank_candidates_with_scores(self, dialog_history, candidates, top_k=26):
+                cl = list(candidates)
+                scores = [0.9] * len(cl)
+                return CandidateRankingResult(cl[:top_k], scores[:top_k], 0.9 if cl else 0.0)
+
+        return KnowledgeTripletPipeline(
+            verbalization_backend="template",
+            coref_backend="heuristic",
+            ranker=_PassthroughRanker(),
+            min_cosine=0.0,
+        )
+
+    @mock.patch("ktc.pipeline.synthesize_evidence")
+    def test_final_knowledge_uses_successful_llm_synthesis(self, mock_synth):
+        from ktc.synthesis import SynthesisResult
+
+        synthesized = "A survivor can file an FIR and seek free legal aid."
+        mock_synth.return_value = SynthesisResult(text=synthesized, used_llm=True)
+        result = self._passthrough_pipeline().run_hybrid(
+            "Victims can file a complaint online.",
+            "agent: Hi. victim: I need help filing a complaint.",
+            enable_live=False,
+            synthesize=True,
+        )
+        self.assertEqual(result.synthesized_knowledge, synthesized)
+        self.assertEqual(result.final_knowledge_text, synthesized)
+        self.assertEqual(result.final_knowledge_sources, ["llm_synthesis"])
+
+    @mock.patch("ktc.pipeline.synthesize_evidence")
+    def test_final_knowledge_falls_back_when_synthesis_fails(self, mock_synth):
+        from ktc.pipeline import assemble_final_knowledge_text
+        from ktc.synthesis import SynthesisResult
+
+        mock_synth.return_value = SynthesisResult(text="concatenated fallback blob", used_llm=False)
+        result = self._passthrough_pipeline().run_hybrid(
+            "Victims can file a complaint online.",
+            "agent: Hi. victim: I need help filing a complaint.",
+            enable_live=False,
+            synthesize=True,
+        )
+        expected, sources = assemble_final_knowledge_text(
+            result.verbalized, result.supplemental_counseling
+        )
+        self.assertEqual(result.synthesized_knowledge, "concatenated fallback blob")
+        self.assertEqual(result.final_knowledge_text, expected)
+        self.assertEqual(result.final_knowledge_sources, sources)
+        self.assertNotEqual(result.final_knowledge_sources, ["llm_synthesis"])
 
 
 class TestCoreference(unittest.TestCase):
@@ -1189,6 +1250,46 @@ class TestLiveKnowledge(unittest.TestCase):
         self.assertEqual(len(merged), 1)
         verbalized = _dedup_texts([openie.text + ".", relevance.text])
         self.assertEqual(len(verbalized), 1)
+
+
+class TestCitationAndSubstringDedup(unittest.TestCase):
+    def test_citation_filter_removes_docket_pattern(self):
+        from ktc.cleaning import strip_legal_citations
+        from ktc.live_summarize import split_live_sentences
+
+        raw = "A rape survivor should be provided legal aid 23 2026:JHHC:16350-DB by the state."
+        cleaned = strip_legal_citations(raw)
+        self.assertNotIn("2026:JHHC:16350-DB", cleaned)
+        self.assertNotIn("JHHC", cleaned)
+        self.assertIn("should be provided legal aid", cleaned)
+
+        page = (
+            "A rape survivor should be provided free medical treatment, psychological counselling, and legal aid. "
+            "23 2026:JHHC:16350-DB confirms the High Court directions on survivor care."
+        )
+        blob = " ".join(split_live_sentences(page))
+        self.assertNotIn("JHHC", blob)
+        self.assertNotIn("16350-DB", blob)
+
+    def test_substring_dedup_keeps_longer_clause(self):
+        from ktc.pipeline import _dedup_texts
+
+        short = "should be provided legal aid"
+        long = (
+            "should be provided free medical treatment, psychological counselling, "
+            "and legal aid"
+        )
+        kept = _dedup_texts([short, long])
+        self.assertEqual(kept, [long])
+        kept_reversed = _dedup_texts([long, short])
+        self.assertEqual(kept_reversed, [long])
+        nested = _dedup_texts(
+            [
+                "Victims should be provided legal aid.",
+                "Victims should be provided legal aid immediately.",
+            ]
+        )
+        self.assertEqual(nested, ["Victims should be provided legal aid immediately."])
 
 
 class TestKnowledgeItem(unittest.TestCase):

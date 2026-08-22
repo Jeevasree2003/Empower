@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from dataclasses import dataclass
 from typing import List, Sequence, Set
 
 from ktc.knowledge_item import KnowledgeCandidate
@@ -19,6 +20,16 @@ from ktc.verbalization import _make_llm_client, _sanitize_llm_sentence
 logger = logging.getLogger(__name__)
 
 DEFAULT_SYNTHESIS_MODEL = "qwen2.5:3b-instruct"
+
+
+@dataclass
+class SynthesisResult:
+    """Passage plus whether it came from a successful LLM call (not concat fallback)."""
+
+    text: str
+    used_llm: bool = False
+
+
 _NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
 _META_PREFIXES = (
     "note:",
@@ -126,27 +137,27 @@ def synthesize_evidence(
     backend: str = "llm",
     model: str = DEFAULT_SYNTHESIS_MODEL,
     llm_config=None,
-) -> str:
-    """Return one grounded passage, or a concatenation of candidate texts."""
+) -> SynthesisResult:
+    """Return one grounded passage, or concatenated candidate texts on fallback."""
     items = [c for c in candidates if (c.text or "").strip()]
     fallback = _concat_candidates(items)
     if not items:
-        return ""
+        return SynthesisResult(text="", used_llm=False)
     if backend == "template":
-        return fallback
+        return SynthesisResult(text=fallback, used_llm=False)
     if backend != "llm":
         raise ValueError(f"Unsupported synthesis backend: {backend}")
 
     api_key = os.environ.get("LLM_API_KEY", "").strip()
     if not api_key:
         logger.warning("LLM_API_KEY not set; falling back to concatenated evidence")
-        return fallback
+        return SynthesisResult(text=fallback, used_llm=False)
 
     try:
         from openai import OpenAI  # noqa: F401 — checked by _make_llm_client
     except ImportError:
         logger.warning("openai package not installed; falling back to concatenated evidence")
-        return fallback
+        return SynthesisResult(text=fallback, used_llm=False)
 
     source_blob = " ".join(c.text for c in items)
     user_prompt = (
@@ -171,11 +182,11 @@ def synthesize_evidence(
         passage = _sanitize_llm_sentence(raw)
     except Exception as exc:
         logger.warning("LLM synthesis failed: %s; falling back to concatenated evidence", exc)
-        return fallback
+        return SynthesisResult(text=fallback, used_llm=False)
 
     if _passage_is_malformed(passage):
         logger.warning("synthesis output malformed; falling back to concatenated evidence")
-        return fallback
+        return SynthesisResult(text=fallback, used_llm=False)
 
     invented = novel_numbers(passage, source_blob)
     if invented:
@@ -183,5 +194,5 @@ def synthesize_evidence(
             "synthesis grounding check failed; invented numbers=%s; falling back to concatenated evidence",
             sorted(invented),
         )
-        return fallback
-    return passage
+        return SynthesisResult(text=fallback, used_llm=False)
+    return SynthesisResult(text=passage, used_llm=True)

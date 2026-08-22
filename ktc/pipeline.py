@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Sequence, Tuple
 
+from ktc.cleaning import drop_strict_substring_texts, normalize_clause_key
 from ktc.coreference import resolve_coreferences
 from ktc.counseling_bank import (
     DOMAIN_CLINICAL,
@@ -60,31 +61,27 @@ _LEGAL_IN_TEXT = re.compile(
 
 
 def _normalize_sentence(text: str) -> str:
-    return re.sub(r"\s+", " ", (text or "").strip().lower()).rstrip(".!?")
+    return normalize_clause_key(text)
 
 
 def _dedup_texts(texts: Sequence[str]) -> List[str]:
-    out: List[str] = []
-    seen = set()
-    for text in texts:
-        key = _normalize_sentence(text)
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        out.append(text)
-    return out
+    return drop_strict_substring_texts(texts)
 
 
 def _dedup_ranked_candidates(candidates: Sequence[KnowledgeCandidate]) -> List[KnowledgeCandidate]:
-    out: List[KnowledgeCandidate] = []
+    unique: List[KnowledgeCandidate] = []
     seen = set()
     for item in candidates:
         key = _normalize_sentence(item.text)
         if not key or key in seen:
             continue
         seen.add(key)
-        out.append(item)
-    return out
+        unique.append(item)
+    kept_keys = {
+        _normalize_sentence(text)
+        for text in drop_strict_substring_texts([item.text for item in unique])
+    }
+    return [item for item in unique if _normalize_sentence(item.text) in kept_keys]
 
 
 def _domain_represented(verbalized: Sequence[str], domain: Optional[str]) -> bool:
@@ -400,16 +397,25 @@ class KnowledgeTripletPipeline:
             else:
                 evidence = list(ranked)
             evidence.extend(supplemental)
-            synthesized_knowledge = synthesize_evidence(
+            synthesis = synthesize_evidence(
                 evidence,
                 dialog_history,
                 backend="llm",
                 model=self.synthesis_model,
                 llm_config=self.live_config,
             )
-        final_knowledge_text, final_sources = assemble_final_knowledge_text(
-            verbalized, supplemental
-        )
+            synthesized_knowledge = synthesis.text
+            if synthesis.used_llm and (synthesis.text or "").strip():
+                final_knowledge_text = synthesis.text.strip()
+                final_sources = ["llm_synthesis"]
+            else:
+                final_knowledge_text, final_sources = assemble_final_knowledge_text(
+                    verbalized, supplemental
+                )
+        else:
+            final_knowledge_text, final_sources = assemble_final_knowledge_text(
+                verbalized, supplemental
+            )
         live_pages = list((live_funnel.pages if live_funnel else []) or [])
         verbalized_keys = {_normalize_sentence(text) for text in verbalized}
         for page in live_pages:
@@ -484,9 +490,10 @@ class KnowledgeTripletPipeline:
             "query_field_note": (
                 "verbalized is Stage 2e over OpenIE triplets from gated KARE passages and live pages. "
                 "supplemental_counseling is trigger-matched local facts and is not mixed into verbalized. "
-                "final_knowledge_text is the KT for training/response generation: verbalized, plus "
-                "supplemental facts whose domain is missing from verbalized (or supplemental alone "
-                "when verbalized is empty). "
+                "final_knowledge_text is the KT for training/response generation. When synthesize=True "
+                "and LLM-3 succeeds (not concatenation fallback), it equals synthesized_knowledge. "
+                "Otherwise it is verbalized, plus supplemental facts whose domain is missing from "
+                "verbalized (or supplemental alone when verbalized is empty). "
                 "synthesized_knowledge is LLM-3 evidence synthesis over ranked + supplemental candidates; "
                 "it is null unless inspect/run_hybrid is called with synthesize=True. "
                 "Live ranked_candidates[].query is the Tavily search string; it is null/absent on static triplets."

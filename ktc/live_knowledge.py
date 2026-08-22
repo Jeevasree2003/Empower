@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from ktc.cleaning import clean_knowledge_text
+from ktc.cleaning import (
+    clean_knowledge_text,
+    drop_strict_substring_texts,
+    normalize_clause_key,
+    strip_legal_citations,
+)
 from ktc.coreference import resolve_coreferences
 from ktc.entity_extraction import extract_entities
 from ktc.extraction import extract_triplets
@@ -63,20 +68,32 @@ def victim_utterance_from_history(dialog_history: str) -> str:
 
 
 def _norm_key(text: str) -> str:
-    return re.sub(r"\s+", " ", (text or "").strip().lower()).rstrip(".!?")
+    return normalize_clause_key(text)
+
+
+def _live_text_without_citations(text: str) -> str:
+    return strip_legal_citations(text or "")
 
 
 def dedup_candidates(candidates: Sequence[KnowledgeCandidate]) -> List[KnowledgeCandidate]:
-    """Keep the first candidate for each normalized sentence."""
-    out: List[KnowledgeCandidate] = []
+    """Keep the first candidate for each normalized sentence; drop strict substring clauses."""
+    unique: List[KnowledgeCandidate] = []
     seen = set()
     for item in candidates:
+        text = _live_text_without_citations(item.text)
+        if not text:
+            continue
+        if text != (item.text or "").strip():
+            item = replace(item, text=text)
         key = _norm_key(item.text)
         if not key or key in seen:
             continue
         seen.add(key)
-        out.append(item)
-    return out
+        unique.append(item)
+    kept_keys = {
+        _norm_key(text) for text in drop_strict_substring_texts([item.text for item in unique])
+    }
+    return [item for item in unique if _norm_key(item.text) in kept_keys]
 
 
 def sentence_relevance_candidates(
@@ -99,11 +116,12 @@ def sentence_relevance_candidates(
             top_k=top_k_per_page,
         )
         for sentence, _score in kept:
-            if is_scraped_boilerplate(sentence):
+            cleaned = _live_text_without_citations(sentence)
+            if not cleaned or is_scraped_boilerplate(cleaned):
                 continue
             selected.append(
                 KnowledgeCandidate(
-                    text=sentence,
+                    text=cleaned,
                     source="live_api",
                     url=page.url,
                     query=page.query,
@@ -230,15 +248,18 @@ def _triplet_candidates_from_live(
         if is_scraped_boilerplate(item.sentence):
             logger.info("live_skip_boilerplate url=%s", item.source_url)
             continue
-        cleaned = clean_knowledge_text(item.sentence)
+        cleaned = strip_legal_citations(clean_knowledge_text(item.sentence))
         if not cleaned or is_scraped_boilerplate(cleaned):
             continue
         raw = extract_triplets(cleaned, backend="spacy", nlp=nlp)
         resolved = resolve_coreferences(raw, cleaned, nlp=nlp, backend="heuristic")
         for triplet in filter_triplets(resolved):
+            text = _live_text_without_citations(triplet.as_text())
+            if not text:
+                continue
             candidates.append(
                 KnowledgeCandidate(
-                    text=triplet.as_text(),
+                    text=text,
                     source="live_api",
                     url=item.source_url,
                     query=item.query,
