@@ -408,6 +408,9 @@ class KnowledgeTripletPipeline:
             if synthesis.used_llm and (synthesis.text or "").strip():
                 final_knowledge_text = synthesis.text.strip()
                 final_sources = ["llm_synthesis"]
+            elif (synthesis.text or "").strip():
+                final_knowledge_text = synthesis.text.strip()
+                final_sources = ["concatenation_fallback"]
             else:
                 final_knowledge_text, final_sources = assemble_final_knowledge_text(
                     verbalized, supplemental

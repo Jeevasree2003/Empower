@@ -358,7 +358,7 @@ def synthesize_evidence(
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0,
-            max_tokens=1024,
+            max_tokens=2048,
         )
         raw = _strip_fences(response.choices[0].message.content or "")
         passage = _sanitize_synthesis_passage(raw)

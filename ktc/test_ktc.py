@@ -341,7 +341,7 @@ class TestEvidenceSynthesis(unittest.TestCase):
         call_kwargs = mock_client.chat.completions.create.call_args.kwargs
         self.assertEqual(call_kwargs["model"], DEFAULT_SYNTHESIS_MODEL)
         self.assertEqual(call_kwargs["temperature"], 0)
-        self.assertEqual(call_kwargs["max_tokens"], 1024)
+        self.assertEqual(call_kwargs["max_tokens"], 2048)
         self.assertIn("1800-599-0019", call_kwargs["messages"][1]["content"])
         system_prompt = call_kwargs["messages"][0]["content"]
         self.assertIn("You are given a numbered list of candidate facts below", system_prompt)
@@ -597,7 +597,6 @@ class TestEvidenceSynthesis(unittest.TestCase):
 
     @mock.patch("ktc.pipeline.synthesize_evidence")
     def test_final_knowledge_falls_back_when_synthesis_fails(self, mock_synth):
-        from ktc.pipeline import assemble_final_knowledge_text
         from ktc.synthesis import SynthesisResult
 
         mock_synth.return_value = SynthesisResult(text="concatenated fallback blob", used_llm=False)
@@ -607,13 +606,9 @@ class TestEvidenceSynthesis(unittest.TestCase):
             enable_live=False,
             synthesize=True,
         )
-        expected, sources = assemble_final_knowledge_text(
-            result.verbalized, result.supplemental_counseling
-        )
         self.assertEqual(result.synthesized_knowledge, "concatenated fallback blob")
-        self.assertEqual(result.final_knowledge_text, expected)
-        self.assertEqual(result.final_knowledge_sources, sources)
-        self.assertNotEqual(result.final_knowledge_sources, ["llm_synthesis"])
+        self.assertEqual(result.final_knowledge_text, "concatenated fallback blob")
+        self.assertEqual(result.final_knowledge_sources, ["concatenation_fallback"])
 
 
 class TestCoreference(unittest.TestCase):
