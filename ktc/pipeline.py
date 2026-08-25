@@ -421,6 +421,8 @@ class KnowledgeTripletPipeline:
                 enabled=True,
                 ranker=ranker,
                 min_cosine=self.min_cosine,
+                queries=constructed,
+                situations=situations,
             )
             live_elapsed_seconds = time.monotonic() - started
             pool.extend(live_candidates)

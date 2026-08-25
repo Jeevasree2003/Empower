@@ -305,6 +305,8 @@ def fetch_live_knowledge(
     enabled: Optional[bool] = None,
     ranker=None,
     min_cosine: float = MIN_COSINE,
+    queries: Optional[List[SearchQuery]] = None,
+    situations: Optional[Sequence[str]] = None,
 ) -> Tuple[List[KnowledgeCandidate], List[SearchQuery], List[LiveKnowledgeSentence], LiveFunnel]:
     """Run stages 0–0.9 for one turn. Returns candidates, queries, raw live sentences, funnel."""
     live_on = config.enable_live_retrieval if enabled is None else enabled
@@ -314,11 +316,14 @@ def fetch_live_knowledge(
     logger.info("live utterance=%r", victim_utterance)
     entities = extract_entities(victim_utterance, nlp=nlp)
     logger.info("live entities=%s", [e.get("text") for e in entities])
-    queries = build_queries(
-        entities,
-        max_queries=config.max_live_queries_per_dialogue,
-        victim_text=victim_utterance,
-    )
+    if queries is None:
+        queries = build_queries(
+            entities,
+            max_queries=config.max_live_queries_per_dialogue,
+            victim_text=victim_utterance,
+            ranker=ranker,
+            situations=situations,
+        )
     logger.info("live queries=%s", [q.text for q in queries])
 
     deadline = LiveDeadline(config.max_live_retrieval_seconds)

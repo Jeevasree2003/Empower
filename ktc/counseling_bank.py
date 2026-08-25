@@ -260,6 +260,7 @@ def _facts() -> List[CounselingFact]:
             "Childline 1098 is the 24x7 emergency helpline for children in distress in India and can connect you to local protection services.",
             frozenset({"child_exploitation", "trafficking"}),
             "https://www.childlineindia.org/",
+            emergency=True,
         ),
         CounselingFact(
             DOMAIN_LEGAL,
