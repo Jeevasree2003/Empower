@@ -132,6 +132,50 @@ _SITUATION_RANK_HINTS = {
     "sexual_assault": "sexual assault molestation FIR IPC 354 medical legal aid",
 }
 
+# Short checklist tokens derived from _SITUATION_RANK_HINTS (any-one match covers the situation).
+_SITUATION_REQUIRED_FACT_KEYWORDS: Dict[str, List[str]] = {
+    "help_seeking": ["kiran", "icall", "helpline"],
+    "suicide_crisis": ["kiran", "1800-599-0019", "suicide"],
+    "homicide_threat": ["506", "fir", "intimidation"],
+    "rape": ["376", "fir", "legal aid"],
+    "kicked_out": ["pwdva", "residence", "maintenance"],
+    "workplace_harassment": ["posh", "internal complaints", "workplace"],
+    "loan_recovery": ["rbi", "recovery", "complaint"],
+    "investment_fraud": ["cybercrime.gov.in", "fraud", "investment"],
+    "missing_person": ["missing", "police", "complaint"],
+    "desertion_bigamy": ["494", "498a", "bigamy"],
+    "domestic_violence": ["498a", "pwdva", "181"],
+    "child_exploitation": ["pocso", "1098", "child welfare"],
+    "online_harassment": ["67a", "cybercrime.gov.in", "obscene"],
+    "identity_theft": ["identity theft", "aadhaar", "cybercrime.gov.in"],
+    "online_bullying": ["cyberbullying", "complaint", "social media"],
+    "matrimonial_fraud": ["marriage", "scam", "police"],
+    "intimate_content_sharing": ["67a", "intimate", "cybercrime.gov.in"],
+    "financial_scam": ["cybercrime.gov.in", "upi", "rbi"],
+    "social_exclusion": ["helpline", "ostracism", "support"],
+    "acid_attack": ["acid", "fir", "compensation"],
+    "trafficking": ["trafficking", "children", "immoral traffic"],
+    "cyberstalking": ["354d", "stalking", "cybercrime.gov.in"],
+    "exposing_personal_information": ["doxxing", "it act", "privacy"],
+    "sexual_assault": ["354", "fir", "legal aid"],
+    "gang_rape": ["376d", "fir", "medical"],
+    "torture": ["498a", "pwdva", "181"],
+}
+
+
+def situation_gaps(situations: List[str], facts_retrieved: List[str]) -> List[str]:
+    """Situations whose required-fact keywords are all absent from retrieved facts."""
+    blob = " ".join(facts_retrieved or []).lower()
+    missing: List[str] = []
+    for name in situations or []:
+        keywords = _SITUATION_REQUIRED_FACT_KEYWORDS.get(name) or []
+        if not keywords:
+            continue
+        if any(token.lower() in blob for token in keywords):
+            continue
+        missing.append(name)
+    return missing
+
 # One descriptive exemplar per crime situation for SBERT cosine fallback.
 # Regex-ladder labels are included so unmatched turns share the same embedding space.
 SITUATION_EXEMPLARS: Dict[str, str] = {

@@ -17,6 +17,7 @@ from ktc.counseling_bank import (
     content_need_domains,
     counseling_candidates,
 )
+from ktc.case_memory import CaseMemory
 from ktc.entity_extraction import extract_entities
 from ktc.extraction import extract_triplets
 from ktc.filtering import filter_triplets
@@ -28,7 +29,14 @@ from ktc.live_knowledge import (
     victim_utterances_from_history,
 )
 from ktc.passages import select_dual_domain_passages, split_knowledge_passages
-from ktc.query_builder import SearchQuery, build_queries, resolve_dialogue_situations
+from ktc.query_builder import (
+    SearchQuery,
+    _TEMPLATE_PRIORITY,
+    _situation_queries,
+    build_queries,
+    resolve_dialogue_situations,
+    situation_gaps,
+)
 from ktc.ranking import (
     MAX_RANKED,
     MIN_COSINE,
@@ -43,6 +51,29 @@ from ktc.triplet import Triplet
 from ktc.verbalization import verbalize_triplets
 
 logger = logging.getLogger(__name__)
+
+_CASE_MEMORIES: Dict[str, CaseMemory] = {}
+
+
+def get_case_memory(dialogue_id: str) -> CaseMemory:
+    """Return the process-local CaseMemory for *dialogue_id*, creating it on first access."""
+    key = str(dialogue_id)
+    memory = _CASE_MEMORIES.get(key)
+    if memory is None:
+        memory = CaseMemory(dialogue_id=key)
+        _CASE_MEMORIES[key] = memory
+    return memory
+
+
+def clear_case_memories() -> None:
+    _CASE_MEMORIES.clear()
+
+
+def _gap_situation_priority(name: str, victim_text: str) -> int:
+    queries = _situation_queries(victim_text, situations=[name])
+    if not queries:
+        return 99
+    return min(_TEMPLATE_PRIORITY.get(query.template, 50) for query in queries)
 
 _SCAM_NOISE = re.compile(
     r"romance scam|kinjal|high return scheme|fake kyc|investment scheme|"
@@ -399,13 +430,31 @@ class KnowledgeTripletPipeline:
         if query and _VIOLENCE_HINT.search(query):
             filtered = [t for t in filtered if not _SCAM_NOISE.search(t.as_text())]
 
+        query_entities = entities
+        query_situations = situations
+        memory = None
+        if dialogue_id:
+            memory = get_case_memory(str(dialogue_id))
+            memory.update_situations(situations)
+            memory.update_entities(entities)
+            query_entities = list(memory.entities_seen)
+            query_situations = list(memory.situations_seen)
         constructed = build_queries(
-            entities,
+            query_entities,
             max_queries=self.live_config.max_live_queries_per_dialogue,
             victim_text=victim_span,
             ranker=ranker,
-            situations=situations,
+            situations=query_situations,
         )
+        if memory is not None:
+            constructed = memory.record_queries(constructed)
+            logger.info(
+                "case_memory_turn dialogue_id=%s turn=%s situations_seen=%s queries_this_turn=%s",
+                dialogue_id,
+                turn,
+                memory.situations_seen,
+                [query.text for query in constructed],
+            )
         pool = static_candidates_from_triplets(filtered)
         live_on = self.live_config.enable_live_retrieval if enable_live is None else enable_live
         live_elapsed_seconds = None
@@ -422,10 +471,51 @@ class KnowledgeTripletPipeline:
                 ranker=ranker,
                 min_cosine=self.min_cosine,
                 queries=constructed,
-                situations=situations,
+                situations=situations if memory is None else list(memory.situations_seen),
             )
             live_elapsed_seconds = time.monotonic() - started
             pool.extend(live_candidates)
+            if memory is not None:
+                memory.record_facts([item.text for item in live_candidates])
+                if (
+                    self.api_budget.can_call()
+                    and len(memory.queries_issued) < self.live_config.max_live_queries_per_dialogue
+                ):
+                    gaps = situation_gaps(list(memory.situations_seen), memory.facts_retrieved)
+                    if gaps:
+                        gap_name = min(
+                            gaps,
+                            key=lambda name: (_gap_situation_priority(name, victim_span), name),
+                        )
+                        follow_up = _situation_queries(victim_span, situations=[gap_name])
+                        follow_up = memory.record_queries(follow_up[:1])
+                        if follow_up:
+                            logger.info(
+                                "situation_gap_followup dialogue_id=%s situation=%s query=%r",
+                                dialogue_id,
+                                gap_name,
+                                follow_up[0].text,
+                            )
+                            extra_candidates, extra_queries, _extra_raw, extra_funnel = fetch_live_knowledge(
+                                victim_span,
+                                self.live_config,
+                                self.api_budget,
+                                nlp=nlp,
+                                enabled=True,
+                                ranker=ranker,
+                                min_cosine=self.min_cosine,
+                                queries=follow_up,
+                                situations=[gap_name],
+                            )
+                            pool.extend(extra_candidates)
+                            constructed = list(constructed) + list(extra_queries)
+                            memory.record_facts([item.text for item in extra_candidates])
+                            if live_funnel is not None and extra_funnel is not None:
+                                live_funnel.live_sentences += extra_funnel.live_sentences
+                                live_funnel.live_triplets += extra_funnel.live_triplets
+                                live_funnel.live_sentence_relevance += extra_funnel.live_sentence_relevance
+                                live_funnel.live_sentences_used_directly += extra_funnel.live_sentences_used_directly
+                                live_funnel.pages.extend(extra_funnel.pages or [])
 
         rank_text = query or dialog_history
         ranked, top1_score = rank_candidates(
@@ -439,6 +529,8 @@ class KnowledgeTripletPipeline:
         ranked = _dedup_ranked_candidates(ranked)
         supplemental = counseling_candidates(entities, victim_span, situations=situations)
         verbalized = _dedup_texts(self._verbalize_candidates(ranked))
+        if memory is not None:
+            memory.record_facts(verbalized)
         static_verbalized = []
         if filtered:
             for sentence in verbalize_triplets(

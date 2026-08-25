@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import re
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence, Tuple
 
 # Paper Table I style categories: crime, mental_health, legal, medium
 CATEGORY_CRIME = "crime"
@@ -111,6 +112,46 @@ _MEDIUM_TERMS = (
 
 _SECTION_RE = re.compile(r"\bsection\s+(\d+[A-Za-z]?)\b", re.IGNORECASE)
 _IT_ACT_SECTION_RE = re.compile(r"\b(?:sec(?:tion)?\.?\s*)?66[A-Za-z]?\b", re.IGNORECASE)
+
+logger = logging.getLogger(__name__)
+
+SEMANTIC_ENTITY_THRESHOLD = 0.45
+
+# Victim-phrased exemplars (not lexicon keywords). Keys under crime are comments only.
+CATEGORY_EXEMPLARS: Dict[str, Sequence[str]] = {
+    CATEGORY_CRIME: (
+        # trafficking_or_exploitation — dialogue 111 shelter-home videos / "do business"
+        "A gang makes dirty videos of these girls in the shelter and sells them for business.",
+        # dialogue 1000 unsolicited obscene / sexual coercion
+        "Someone sent me unsolicited obscene sexual content and pressed me to have a relationship.",
+        "Men on the internet bluffed me and took all my money after a fake promise.",
+        "My husband hits me at home and I am afraid he will hurt the children.",
+        "A fake groom's family cheated me over a marriage meeting and robbed me.",
+    ),
+    CATEGORY_MENTAL_HEALTH: (
+        "I cannot sleep and I feel hopeless and panicked every night.",
+        "I do not know where to go or whom to talk to and my mind will not slow down.",
+        "I feel empty and on edge and I am falling apart inside.",
+        "I keep shaking and I cannot stop crying when I think about what happened.",
+    ),
+    CATEGORY_LEGAL: (
+        "I want to file a case but I do not know which office will take it.",
+        "I need a lawyer and a protection paper from the court.",
+        "Which official number do I call so someone will record my complaint?",
+        "I was told to write an application and attach evidence for the commission.",
+    ),
+    CATEGORY_MEDIUM: (
+        "He keeps sending me messages on that photo-sharing app on my phone.",
+        "The video arrived in my inbox and then another copy came by chat.",
+        "Unknown numbers keep calling me and the same account appears on my feed.",
+        "It started on a messenger popup and then showed up in my mail.",
+    ),
+}
+
+_CLAUSE_SPLIT_RE = re.compile(
+    r"(?:\. |\? |! |; |, | and | but |\n)+",
+    re.IGNORECASE,
+)
 
 
 def _normalize(text: str) -> str:
@@ -246,3 +287,102 @@ def extract_entities_from_history(dialog_history: str, nlp=None) -> List[Dict[st
     if last.startswith("victim: "):
         last = last[len("victim: ") :]
     return extract_entities(last, nlp=nlp)
+
+
+def split_utterance_clauses(victim_utterance: str) -> List[str]:
+    """Split on sentence boundaries and coordinating conjunctions; drop tiny fragments."""
+    text = re.sub(r"\s+", " ", (victim_utterance or "").strip())
+    if not text:
+        return []
+    parts = _CLAUSE_SPLIT_RE.split(text)
+    clauses: List[str] = []
+    for part in parts:
+        clause = part.strip(" .?!,;")
+        if not clause:
+            continue
+        tokens = re.findall(r"[A-Za-z0-9']+", clause)
+        if len(tokens) < 3:
+            continue
+        clauses.append(clause)
+    return clauses
+
+
+def extract_entities_semantic(
+    victim_utterance: str,
+    ranker,
+    threshold: float = SEMANTIC_ENTITY_THRESHOLD,
+) -> List[Dict[str, str]]:
+    """Tag clauses by cosine similarity to CATEGORY_EXEMPLARS (no lexicon required)."""
+    entities, _scores = _semantic_entities_with_scores(victim_utterance, ranker, threshold)
+    return entities
+
+
+def _semantic_entities_with_scores(
+    victim_utterance: str,
+    ranker,
+    threshold: float,
+) -> Tuple[List[Dict[str, str]], List[Tuple[str, str, float]]]:
+    if ranker is None or not (victim_utterance or "").strip():
+        return [], []
+    if not hasattr(ranker, "cosine_to_query"):
+        return [], []
+    clauses = split_utterance_clauses(victim_utterance)
+    if not clauses:
+        return [], []
+    seen = set()
+    entities: List[Dict[str, str]] = []
+    scores_out: List[Tuple[str, str, float]] = []
+    for clause in clauses:
+        best_by_category: Dict[str, float] = {}
+        for category, exemplars in CATEGORY_EXEMPLARS.items():
+            example_list = list(exemplars)
+            if not example_list:
+                continue
+            values = ranker.cosine_to_query(clause, example_list)
+            if not values:
+                continue
+            best_by_category[category] = max(float(score) for score in values)
+        for category, score in best_by_category.items():
+            if score < threshold:
+                continue
+            key = (_normalize(clause), category)
+            if key in seen:
+                continue
+            seen.add(key)
+            entities.append({"text": clause, "category": category})
+            scores_out.append((clause, category, score))
+    return entities, scores_out
+
+
+def resolve_entities(
+    victim_utterance: str,
+    nlp=None,
+    ranker=None,
+    threshold: float = SEMANTIC_ENTITY_THRESHOLD,
+    log: bool = True,
+) -> List[Dict[str, str]]:
+    """Lexicon extract_entities first; semantic clause tagging only if lexicon is empty."""
+    lexicon = extract_entities(victim_utterance, nlp=nlp)
+    if lexicon:
+        if log:
+            logger.info("entity_source=lexicon count=%s", len(lexicon))
+        return lexicon
+    if ranker is None or not (victim_utterance or "").strip():
+        if log:
+            logger.info("entity_source=none")
+        return []
+    semantic, scored = _semantic_entities_with_scores(victim_utterance, ranker, threshold)
+    if semantic:
+        if log:
+            for clause, category, score in scored:
+                logger.info(
+                    "entity_source=semantic clause=%r category=%s score=%.3f",
+                    clause,
+                    category,
+                    score,
+                )
+        return semantic
+    if log:
+        logger.info("entity_source=none")
+    return []
+
