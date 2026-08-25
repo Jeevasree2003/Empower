@@ -878,10 +878,10 @@ class TestLiveConfig(unittest.TestCase):
         self.assertIn("icallhelpline.org", config.trusted_domains)
         self.assertIn("indiankanoon.org", config.trusted_domains)
 
-    def test_groq_llm_api_base_from_config(self):
+    def test_llm_api_base_from_config(self):
         config = LiveRetrievalConfig.load()
-        self.assertEqual(config.llm_model, "openai/gpt-oss-120b")
-        self.assertEqual(config.llm_api_base, "https://api.groq.com/openai/v1")
+        self.assertEqual(config.llm_model, "qwen2.5:3b-instruct")
+        self.assertEqual(config.llm_api_base, "http://localhost:11434/v1")
 
     def test_api_call_budget(self):
         budget = ApiCallBudget(2)
@@ -1702,13 +1702,21 @@ class TestCounselingBank(unittest.TestCase):
 
         self.assertEqual(counseling_candidates([], ""), [])
 
-    def test_generic_help_does_not_fire_always_facts(self):
+    def test_generic_help_does_not_fire_on_bare_greeting(self):
+        from ktc.counseling_bank import counseling_candidates
+
+        items = counseling_candidates([], "Hi.")
+        self.assertEqual(items, [])
+
+    def test_general_support_urgent_help_fires_bank_fact(self):
         from ktc.counseling_bank import counseling_candidates
 
         items = counseling_candidates([], "Hi..I need some urgent help.")
-        self.assertEqual(items, [])
+        self.assertTrue(items)
+        joined = " ".join(c.text.lower() for c in items)
+        self.assertTrue("181" in joined or "1800-599-0019" in joined or "kiran" in joined)
 
-    def test_generic_helpline_support_fires_bank_fact(self):
+    def test_general_support_helpline_phrasing_fires_bank_fact(self):
         from ktc.counseling_bank import counseling_candidates
 
         items = counseling_candidates(
@@ -2094,9 +2102,11 @@ class TestPipelineIntegration(unittest.TestCase):
         self.assertTrue(insane.get("constructed_queries"))
         self.assertEqual(generic.get("constructed_queries"), [])
         self.assertTrue(insane.get("supplemental_counseling"))
-        self.assertEqual(generic.get("supplemental_counseling"), [])
+        self.assertTrue(generic.get("supplemental_counseling"))
         extra = [c["text"] for c in insane["supplemental_counseling"]]
+        generic_extra = [c["text"] for c in generic["supplemental_counseling"]]
         self.assertNotEqual(insane["verbalized"], extra)
+        self.assertNotEqual(generic["verbalized"], generic_extra)
 
     def test_torture_turn_is_not_generic_kiran_only(self):
         from ktc.ranking import CandidateRankingResult

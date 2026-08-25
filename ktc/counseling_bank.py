@@ -90,6 +90,10 @@ _GENERAL_HELP_PATTERNS = (
     r"\bhelp me\b",
     r"\bwho can i talk to\b",
     r"\bwho can i contact\b",
+    r"\burgent help\b",
+    r"\bneed some help\b",
+    r"\bi need help\b",
+    r"\bneed help\b",
 )
 
 
