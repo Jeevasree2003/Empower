@@ -764,6 +764,24 @@ class TestRanking(unittest.TestCase):
         self.assertEqual(scores, [])
         self.assertAlmostEqual(top1, 0.22)
 
+    def test_fact_embeddings_are_cached_across_calls(self):
+        from ktc.passages import select_relevant_passages
+        from ktc.ranking import clear_text_embedding_cache
+
+        clear_text_embedding_cache()
+        model = mock.Mock()
+        model.encode.side_effect = lambda texts, **kwargs: np.ones((len(list(texts)), 4), dtype=float)
+        ranker = mock.Mock(model=model)
+        facts = [
+            "KIRAN, the national mental health helpline 1800-599-0019, offers 24x7 distress support in India."
+        ]
+        first = select_relevant_passages(facts, "women helpline support", ranker, min_cosine=0.0)
+        first_calls = model.encode.call_count
+        self.assertGreater(first_calls, 0)
+        second = select_relevant_passages(facts, "women helpline support", ranker, min_cosine=0.0)
+        self.assertEqual(model.encode.call_count, first_calls)
+        self.assertEqual(len(first), len(second))
+
     def test_ranking_query_ignores_bot_greeting(self):
         history = "agent: Greetings from Rakshak. user: my husband threatened to murder me."
         with mock.patch("ktc.entity_extraction.extract_entities", return_value=[{"text": "murder", "category": "crime"}]):
@@ -1350,6 +1368,34 @@ class TestLiveKnowledge(unittest.TestCase):
         self.assertNotIn("IIT Bombay", joined)
         self.assertTrue(all(c.extraction_method == "sentence_relevance" for c in candidates))
 
+    def test_sentence_relevance_encodes_all_pages_in_one_batch(self):
+        from ktc.live_knowledge import sentence_relevance_candidates
+        from ktc.live_summarize import LivePageStats
+        from ktc.ranking import clear_text_embedding_cache
+
+        clear_text_embedding_cache()
+        pages = [
+            LivePageStats(
+                url=f"https://icallhelpline.org/p{index}",
+                query=f"helpline query {index}",
+                sentences_extracted=2,
+                sentences=[
+                    f"This helpline page {index} explains confidential telephone counseling in India.",
+                    f"This second sentence on page {index} mentions distress support hours.",
+                ],
+            )
+            for index in range(3)
+        ]
+        model = mock.Mock()
+        model.encode.side_effect = lambda texts, **kwargs: np.ones((len(list(texts)), 4), dtype=float)
+        ranker = mock.Mock(model=model)
+        sentence_relevance_candidates(pages, ranker, min_cosine=0.0, top_k_per_page=8)
+        self.assertEqual(model.encode.call_count, 1)
+        encoded = list(model.encode.call_args[0][0])
+        for page in pages:
+            for sentence in page.sentences:
+                self.assertIn(sentence, encoded)
+
     def test_openie_empty_keeps_live_sentence_direct_in_verbalized(self):
         from ktc.live_knowledge import LiveFunnel, direct_sentence_candidates
         from ktc.live_summarize import LivePageStats
@@ -1661,6 +1707,17 @@ class TestCounselingBank(unittest.TestCase):
 
         items = counseling_candidates([], "Hi..I need some urgent help.")
         self.assertEqual(items, [])
+
+    def test_generic_helpline_support_fires_bank_fact(self):
+        from ktc.counseling_bank import counseling_candidates
+
+        items = counseling_candidates(
+            [{"text": "helpline", "category": CATEGORY_LEGAL}],
+            "I want to take women helpline support",
+        )
+        self.assertTrue(items)
+        joined = " ".join(c.text.lower() for c in items)
+        self.assertTrue("181" in joined or "1800-599-0019" in joined or "kiran" in joined)
 
     def test_insane_turn_prefers_helplines_not_fir(self):
         from ktc.counseling_bank import counseling_candidates

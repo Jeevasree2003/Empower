@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Sequence, Tuple
+
+import numpy as np
 
 from ktc.cleaning import (
     clean_knowledge_text,
@@ -27,7 +30,7 @@ from ktc.live_summarize import (
     summarize_search_results,
 )
 from ktc.query_builder import SearchQuery, build_queries
-from ktc.ranking import MIN_COSINE, select_sentences_by_cosine
+from ktc.ranking import MIN_COSINE, encode_texts_cached, select_sentences_by_cosine
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +115,18 @@ def dedup_candidates(candidates: Sequence[KnowledgeCandidate]) -> List[Knowledge
     return [item for item in unique if _norm_key(item.text) in kept_keys]
 
 
+def _unique_live_sentences(sentences: Sequence[str]) -> List[str]:
+    unique: List[str] = []
+    seen = set()
+    for sentence in sentences:
+        key = re.sub(r"\s+", " ", (sentence or "").strip().lower()).rstrip(".!?")
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        unique.append(sentence.strip())
+    return unique
+
+
 def sentence_relevance_candidates(
     pages: Sequence[LivePageStats],
     ranker,
@@ -119,18 +134,59 @@ def sentence_relevance_candidates(
     min_cosine: float = MIN_COSINE,
     top_k_per_page: int = 8,
 ) -> List[KnowledgeCandidate]:
-    """SBERT-selected live sentences that do not depend on OpenIE succeeding."""
+    """SBERT-selected live sentences that do not depend on OpenIE succeeding.
+
+    All pages in a turn are scored in one encoder batch, then split per page.
+    """
     if ranker is None:
         return []
+    started = time.monotonic()
+    page_uniques = [_unique_live_sentences(page.sentences) for page in pages]
+    total_sentences = sum(len(group) for group in page_uniques)
     selected: List[KnowledgeCandidate] = []
-    for page in pages:
-        kept = select_sentences_by_cosine(
-            page.query,
-            page.sentences,
-            ranker,
-            min_cosine=min_cosine,
-            top_k=top_k_per_page,
-        )
+    model = getattr(ranker, "model", None)
+    encode = getattr(model, "encode", None) if model is not None else None
+    page_kept: List[List[Tuple[str, float]]] = []
+    if callable(encode):
+        queries: List[str] = []
+        query_index: Dict[str, int] = {}
+        for page in pages:
+            query = (page.query or "").strip() or " "
+            if query not in query_index:
+                query_index[query] = len(queries)
+                queries.append(query)
+        flat: List[str] = []
+        spans: List[Tuple[int, int]] = []
+        for group in page_uniques:
+            spans.append((len(flat), len(group)))
+            flat.extend(group)
+        batch = queries + flat
+        embs = encode_texts_cached(model, batch) if batch else np.zeros((0, 0))
+        n_queries = len(queries)
+        sent_embs = embs[n_queries:]
+        for page, group, (start, count) in zip(pages, page_uniques, spans):
+            if count == 0:
+                page_kept.append([])
+                continue
+            query = (page.query or "").strip() or " "
+            query_emb = embs[query_index[query]]
+            scores = np.dot(sent_embs[start : start + count], query_emb)
+            ranked = sorted(zip(group, scores), key=lambda item: float(item[1]), reverse=True)
+            page_kept.append(
+                [(text, float(score)) for text, score in ranked if float(score) >= min_cosine][:top_k_per_page]
+            )
+    else:
+        for page, group in zip(pages, page_uniques):
+            page_kept.append(
+                select_sentences_by_cosine(
+                    page.query,
+                    group,
+                    ranker,
+                    min_cosine=min_cosine,
+                    top_k=top_k_per_page,
+                )
+            )
+    for page, kept in zip(pages, page_kept):
         for sentence, _score in kept:
             cleaned = _live_text_without_citations(sentence)
             if not cleaned or is_scraped_boilerplate(cleaned):
@@ -144,6 +200,12 @@ def sentence_relevance_candidates(
                     extraction_method="sentence_relevance",
                 )
             )
+    logger.info(
+        "sentence_relevance_elapsed elapsed=%.3fs pages=%s total_sentences=%s",
+        time.monotonic() - started,
+        len(pages),
+        total_sentences,
+    )
     return selected
 
 
@@ -155,14 +217,16 @@ def direct_sentence_candidates(
     *,
     min_cosine: float = MIN_COSINE,
     top_k_per_page: int = 8,
+    relevance: Optional[Sequence[KnowledgeCandidate]] = None,
 ) -> Tuple[List[KnowledgeCandidate], List[KnowledgeCandidate]]:
     """SBERT-relevant live sentences: OpenIE when it works, else the fluent sentence itself."""
-    relevance = sentence_relevance_candidates(
-        pages,
-        ranker,
-        min_cosine=min_cosine,
-        top_k_per_page=top_k_per_page,
-    )
+    if relevance is None:
+        relevance = sentence_relevance_candidates(
+            pages,
+            ranker,
+            min_cosine=min_cosine,
+            top_k_per_page=top_k_per_page,
+        )
     openie_by_url: Dict[str, List[KnowledgeCandidate]] = {}
     for item in openie:
         openie_by_url.setdefault(item.url or "", []).append(item)
@@ -299,6 +363,12 @@ def fetch_live_knowledge(
 
     openie_candidates = _triplet_candidates_from_live(all_live_sentences, nlp=nlp)
     per_page = config.live_sentence_candidates_per_page or config.live_sentence_top_k
+    relevance_candidates = sentence_relevance_candidates(
+        page_stats,
+        ranker,
+        min_cosine=min_cosine,
+        top_k_per_page=per_page,
+    )
     extra_openie, direct_candidates = direct_sentence_candidates(
         page_stats,
         openie_candidates,
@@ -306,12 +376,7 @@ def fetch_live_knowledge(
         nlp=nlp,
         min_cosine=min_cosine,
         top_k_per_page=per_page,
-    )
-    relevance_candidates = sentence_relevance_candidates(
-        page_stats,
-        ranker,
-        min_cosine=min_cosine,
-        top_k_per_page=per_page,
+        relevance=relevance_candidates,
     )
     openie_candidates = list(openie_candidates) + list(extra_openie)
     candidates = dedup_candidates(list(openie_candidates) + list(direct_candidates))

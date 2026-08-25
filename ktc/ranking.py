@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, List, Optional, Protocol, Tuple, runtime_checkable
+from typing import Dict, Iterable, List, Optional, Protocol, Sequence, Tuple, runtime_checkable
 
 import numpy as np
 import re
@@ -13,6 +13,47 @@ from ktc.triplet import Triplet
 
 MIN_COSINE = 0.38
 MAX_RANKED = 16
+
+# Process-level cache: (id(model), normalized text) -> embedding vector.
+_TEXT_EMBEDDING_CACHE: Dict[Tuple[int, str], np.ndarray] = {}
+
+
+def _embed_cache_key(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip().lower())
+
+
+def clear_text_embedding_cache() -> None:
+    _TEXT_EMBEDDING_CACHE.clear()
+
+
+def encode_texts_cached(model, texts: Sequence[str], *, normalize_embeddings: bool = True) -> np.ndarray:
+    """Encode texts, reusing embeddings for normalized strings already seen on this model."""
+    items = list(texts)
+    if not items:
+        return np.zeros((0, 0), dtype=float)
+    model_id = id(model)
+    keys = [_embed_cache_key(text) for text in items]
+    missing_pos: List[int] = []
+    missing_texts: List[str] = []
+    seen_missing: Dict[str, int] = {}
+    for index, (text, key) in enumerate(zip(items, keys)):
+        cache_key = (model_id, key)
+        if cache_key in _TEXT_EMBEDDING_CACHE:
+            continue
+        if key in seen_missing:
+            continue
+        seen_missing[key] = index
+        missing_pos.append(index)
+        missing_texts.append(text)
+    if missing_texts:
+        raw = model.encode(missing_texts, normalize_embeddings=normalize_embeddings)
+        encoded = np.asarray(raw, dtype=float)
+        if encoded.ndim == 1:
+            encoded = encoded.reshape(1, -1)
+        for text_index, row in zip(missing_pos, encoded):
+            _TEXT_EMBEDDING_CACHE[(model_id, keys[text_index])] = np.asarray(row, dtype=float)
+    stacked = np.stack([_TEXT_EMBEDDING_CACHE[(model_id, key)] for key in keys])
+    return stacked
 
 
 @dataclass
@@ -111,9 +152,9 @@ class SentenceBertRanker:
             return RankingResult(triplets=[], scores=[], top1_score=0.0)
 
         history_text = dialog_history.strip() or " "
-        history_emb = self.model.encode(history_text, normalize_embeddings=True)
+        history_emb = encode_texts_cached(self.model, [history_text])[0]
         triplet_texts = [t.as_text() for t in triplet_list]
-        triplet_embs = self.model.encode(triplet_texts, normalize_embeddings=True)
+        triplet_embs = encode_texts_cached(self.model, triplet_texts)
 
         scores = np.dot(triplet_embs, history_emb)
         order = _stable_rank_order(scores, top_k)
@@ -133,9 +174,9 @@ class SentenceBertRanker:
             return CandidateRankingResult(candidates=[], scores=[], top1_score=0.0)
 
         history_text = dialog_history.strip() or " "
-        history_emb = self.model.encode(history_text, normalize_embeddings=True)
+        history_emb = encode_texts_cached(self.model, [history_text])[0]
         texts = [c.text for c in candidate_list]
-        embs = self.model.encode(texts, normalize_embeddings=True)
+        embs = encode_texts_cached(self.model, texts)
 
         scores = np.dot(embs, history_emb)
         order = _stable_rank_order(scores, top_k)
@@ -148,8 +189,9 @@ class SentenceBertRanker:
         """Cosine similarity of each text to *query* using this ranker's encoder."""
         if not texts:
             return []
-        query_emb = self.model.encode(query.strip() or " ", normalize_embeddings=True)
-        text_embs = self.model.encode(list(texts), normalize_embeddings=True)
+        batch = encode_texts_cached(self.model, [query.strip() or " ", *list(texts)])
+        query_emb = batch[0]
+        text_embs = batch[1:]
         scores = np.dot(text_embs, query_emb)
         return [float(score) for score in scores]
 
@@ -211,8 +253,8 @@ def cosine_scores_for_query(ranker, query: str, texts: List[str]) -> List[float]
     model = getattr(ranker, "model", None)
     if model is None:
         return []
-    query_emb = model.encode(query.strip() or " ", normalize_embeddings=True)
-    text_embs = model.encode(list(texts), normalize_embeddings=True)
+    query_emb = encode_texts_cached(model, [query.strip() or " "])[0]
+    text_embs = encode_texts_cached(model, list(texts))
     return [float(score) for score in np.dot(text_embs, query_emb)]
 
 

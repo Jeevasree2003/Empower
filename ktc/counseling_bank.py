@@ -83,6 +83,14 @@ _CYBER = frozenset(
         "revenge porn",
     }
 )
+_GENERAL_SUPPORT = frozenset({"general_support"})
+_GENERAL_HELP_PATTERNS = (
+    r"\bhelpline\b",
+    r"\bsupport\b",
+    r"\bhelp me\b",
+    r"\bwho can i talk to\b",
+    r"\bwho can i contact\b",
+)
 
 
 def _facts() -> List[CounselingFact]:
@@ -90,7 +98,7 @@ def _facts() -> List[CounselingFact]:
         CounselingFact(
             DOMAIN_CLINICAL,
             "KIRAN, the national mental health helpline 1800-599-0019, offers 24x7 distress support in India.",
-            _CRISIS,
+            _CRISIS | _GENERAL_SUPPORT,
             "https://www.mohfw.gov.in/",
         ),
         CounselingFact(
@@ -199,7 +207,7 @@ def _facts() -> List[CounselingFact]:
         CounselingFact(
             DOMAIN_LEGAL,
             "Women in distress in India can call the National Commission for Women helpline 181 for support and referral.",
-            _VIOLENCE | _PROCEDURE | _FAMILY_LAW | _CRISIS,
+            _VIOLENCE | _PROCEDURE | _FAMILY_LAW | _CRISIS | _GENERAL_SUPPORT,
             "https://www.ncw.nic.in/",
         ),
         CounselingFact(
@@ -252,6 +260,8 @@ def _trigger_keys(entities: Sequence[Dict[str, str]], victim_text: str) -> Set[s
     if re.search(r"raped by\s+\d|gang\s+rape", lower):
         keys.add("gang rape")
         keys.add("rape")
+    if any(re.search(pattern, lower) for pattern in _GENERAL_HELP_PATTERNS):
+        keys.add("general_support")
     return {k for k in keys if k}
 
 
@@ -263,8 +273,11 @@ def content_need_domains(entities: Sequence[Dict[str, str]], victim_text: str) -
     if cats & {CATEGORY_MENTAL_HEALTH} or keys & _CRISIS:
         domains.add(DOMAIN_CLINICAL)
     if cats & {CATEGORY_CRIME, CATEGORY_LEGAL} or keys & (
-        _VIOLENCE | _PROCEDURE | _FAMILY_LAW | _MISSING | _CYBER | _WORKPLACE | _DEBT
+        _VIOLENCE | _PROCEDURE | _FAMILY_LAW | _MISSING | _CYBER | _WORKPLACE | _DEBT | _GENERAL_SUPPORT
     ):
+        domains.add(DOMAIN_LEGAL)
+    if keys & _GENERAL_SUPPORT:
+        domains.add(DOMAIN_CLINICAL)
         domains.add(DOMAIN_LEGAL)
     return domains
 

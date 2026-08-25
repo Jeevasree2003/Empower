@@ -6,6 +6,7 @@ import re
 from typing import List, Sequence, Tuple
 
 from ktc.cleaning import clean_knowledge_text
+from ktc.ranking import encode_texts_cached
 
 _K_SPLIT = re.compile(r"<K\d+>", re.IGNORECASE)
 
@@ -72,8 +73,8 @@ def select_relevant_passages(
 
     import numpy as np
 
-    query_emb = model.encode(query.strip(), normalize_embeddings=True)
-    embs = model.encode(list(usable), normalize_embeddings=True)
+    query_emb = encode_texts_cached(model, [query.strip()])[0]
+    embs = encode_texts_cached(model, list(usable))
     scores = np.dot(embs, query_emb)
     order = np.argsort(-scores)
     selected: List[Tuple[str, float]] = []
