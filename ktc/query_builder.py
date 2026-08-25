@@ -193,7 +193,7 @@ SITUATION_EXEMPLARS: Dict[str, str] = {
         "Someone is sharing my private intimate photos and videos without my consent to defame me."
     ),
     "financial_scam": (
-        "Fraudsters tricked me into a UPI or bank transfer and a fake investment financial scam."
+        "Men on the internet bluffed me and took all my money in an online UPI bank fraud financial scam."
     ),
     "social_exclusion": (
         "My community has ostracized and socially excluded me, and I am isolated from family and neighbours."
@@ -205,7 +205,7 @@ SITUATION_EXEMPLARS: Dict[str, str] = {
         "Women and children are being sold, transported, and held against their will in a trafficking racket."
     ),
     "cyberstalking": (
-        "A stalker follows me online, tracks my accounts, and sends repeated threatening messages on Instagram."
+        "Someone who used to follow me is now blackmailing and threatening me and my family with repeated messages."
     ),
     "exposing_personal_information": (
         "Someone published my phone number, address, and private personal information online without consent."

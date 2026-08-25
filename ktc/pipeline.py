@@ -363,9 +363,13 @@ class KnowledgeTripletPipeline:
         nlp = self._get_nlp()
         ranker = self._get_ranker()
         query = ranking_query_from_history(dialog_history, nlp=nlp, ranker=ranker)
-        victim_span = " ".join(victim_utterances_from_history(dialog_history)[-2:])
+        victim_turns = victim_utterances_from_history(dialog_history)
+        victim_span = " ".join(victim_turns[-2:])
+        situation_text = " ".join(victim_turns) or victim_span
         entities = extract_entities(victim_span, nlp=nlp)
         situations, situation_meta = resolve_dialogue_situations(victim_span, ranker=ranker)
+        if not situations and situation_text.strip() and situation_text.strip() != victim_span.strip():
+            situations, situation_meta = resolve_dialogue_situations(situation_text, ranker=ranker)
         passages = split_knowledge_passages(knowledge_text)
         search_domains = content_need_domains(entities, victim_span, situations=situations)
         selected_passages = select_dual_domain_passages(
