@@ -23,8 +23,9 @@ search_provider: tavily
 summarize_backend: extractive
 
 # LLM used for live page summarization (OpenAI-compatible API).
-llm_model: openai/gpt-oss-120b
-llm_api_base: https://api.groq.com/openai/v1
+
+llm_model: qwen2.5:3b-instruct
+llm_api_base: http://localhost:11434/v1
 
 # Estimated USD cost per dialogue at default limits (for planning; update if pricing changes).
 estimated_cost_per_dialogue_usd: 0.03

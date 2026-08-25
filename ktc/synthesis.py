@@ -110,12 +110,11 @@ You are given a numbered list of candidate facts below. Your job is to rewrite t
 You may merge closely related facts into one sentence for fluency, but do not drop any fact's core content (numbers, section references, helpline names, and specific entitlements must all still appear somewhere in the output).
 
 Hard rules (violations are unacceptable):
-1. Use ONLY facts present in the candidate texts. Never add outside knowledge. Never infer facts that are not explicitly stated.
-2. Do not invent legal section numbers, helpline numbers, URLs, dates, or percentages that are not in the candidates.
-3. Keep specific names and numbers exactly as written. If a candidate says "KIRAN helpline 1800-599-0019", you must keep "KIRAN" and "1800-599-0019". Do not genericize to "a mental health helpline".
-4. The dialogue is only context for what the victim asked. Do not treat the dialogue as a source of legal, medical, or helpline facts.
-5. Do not copy legal citation or docket noise (for example 2026:JHHC:16350-DB). Personal names and contact PII were already stripped upstream; do not add new ones.
-6. Output ONLY the synthesized passage. No title, no "Note:", no bullet labels, no markdown, no reasoning.
+1. Do not invent legal section numbers, helpline numbers, URLs, dates, or percentages that are not in the candidates.
+2. Keep specific names and numbers exactly as written. If a candidate says "KIRAN helpline 1800-599-0019", you must keep "KIRAN" and "1800-599-0019". Do not genericize to "a mental health helpline".
+3. The dialogue is only context for what the victim asked. Do not treat the dialogue as a source of legal, medical, or helpline facts.
+4. Do not copy legal citation or docket noise (for example 2026:JHHC:16350-DB). Personal names and contact PII were already stripped upstream; do not add new ones.
+5. Output ONLY the synthesized passage. No title, no "Note:", no bullet labels, no markdown, no reasoning.
 
 Worked example:
 Candidates:
