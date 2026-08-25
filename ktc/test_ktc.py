@@ -2,6 +2,10 @@
 
 import json
 import os
+import sys
+import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -24,16 +28,18 @@ from ktc.live_knowledge import fetch_live_knowledge, static_candidates_from_trip
 from ktc.live_retrieval import SearchResult, _domain_allowed
 from ktc.live_summarize import summarize_search_results
 from ktc.query_builder import build_queries
-from ktc.ranking import _stable_rank_order
+from ktc.ranking import _stable_rank_order, apply_score_gate, ranking_query_from_history
 from ktc.triplet import Triplet
 from ktc.verbalization import verbalize_llm, verbalize_template, verbalize_triplets, _sanitize_llm_sentence
 
 # KARE.jsonl path: env override, then repo-relative default; skip integration tests if missing.
 _DATA_ENV = os.environ.get("KARE_JSONL_PATH")
+_WORKSPACE = Path(__file__).resolve().parents[1]
 if _DATA_ENV:
     DATA_PATH = Path(_DATA_ENV)
 else:
-    DATA_PATH = Path(__file__).resolve().parents[2].parent / "KARE-data" / "KARE" / "Data" / "KARE.jsonl"
+    DATA_PATH = _WORKSPACE / "KARE-data" / "KARE" / "Data" / "KARE.jsonl"
+SAMPLE_PATH = _WORKSPACE / "dataset" / "KARE-Sample.json"
 
 BAD_COREF_HEADS = frozenset({"all the tasks", "millennials", "the matter"})
 
@@ -91,11 +97,12 @@ class TestExtraction(unittest.TestCase):
         self.assertTrue(any("police" in h for h in heads))
 
     def test_real_kare_sentence_patterns(self):
-        if not DATA_PATH.exists():
+        path = DATA_PATH if DATA_PATH.exists() else SAMPLE_PATH
+        if not path.exists():
             self.skipTest("KARE.jsonl not available (set KARE_JSONL_PATH)")
 
         samples = []
-        with DATA_PATH.open(encoding="utf-8") as f:
+        with path.open(encoding="utf-8") as f:
             for line in f:
                 record = json.loads(line)
                 knowledge = record.get("knowledge", "")
@@ -126,6 +133,13 @@ class TestExtraction(unittest.TestCase):
         self.assertGreaterEqual(len(triplets), 2)
         self.assertTrue(any("investigat" in r for r in relations))
         self.assertTrue(any("prosecut" in r for r in relations))
+
+    def test_non_locative_infinitive_not_a_prep_triple(self):
+        triplets = self._extract("The officer arranged to face the accused in court.")
+        self.assertFalse(
+            any(" to" in f" {t.relation.lower()} " or t.relation.lower().endswith(" to") for t in triplets),
+            msg=f"unexpected to-prep triples: {[(t.relation, t.tail) for t in triplets]}",
+        )
 
     def test_direct_object_not_replaced_by_pobj(self):
         triplets = self._extract("Victims can lodge a complaint at the police station.")
@@ -190,6 +204,22 @@ class TestFiltering(unittest.TestCase):
         triplet = Triplet("police station", "to the", "complaint desk")
         self.assertFalse(passes_filters(triplet))
 
+    def test_rejects_weak_copula_prep_relation(self):
+        self.assertFalse(passes_filters(Triplet("victim", "is to", "file a complaint")))
+        self.assertFalse(passes_filters(Triplet("portal", "was of", "the government")))
+
+    def test_rejects_repeated_tokens(self):
+        self.assertFalse(passes_filters(Triplet("People", "Do", "Yoga Yoga")))
+
+    def test_rejects_deictic_comment_heads(self):
+        self.assertFalse(passes_filters(Triplet("they", "called", "me")))
+        self.assertFalse(passes_filters(Triplet("he", "is", "law")))
+        self.assertFalse(passes_filters(Triplet("wlhe", "ca n't control", "his anger")))
+        self.assertFalse(passes_filters(Triplet("t Team Online Legal India", "will be in", "touch with you")))
+
+    def test_rejects_near_duplicate_head_tail(self):
+        self.assertFalse(passes_filters(Triplet("the police station", "helps", "police station")))
+
 
 class TestVerbalization(unittest.TestCase):
     def test_template_adds_punctuation(self):
@@ -238,13 +268,347 @@ class TestVerbalization(unittest.TestCase):
         mock_client.chat.completions.create.return_value = mock_response
         mock_make_client.return_value = (mock_client, LiveRetrievalConfig(llm_model="test-model"))
 
+        fake_openai = mock.Mock()
         with mock.patch.dict(os.environ, {"LLM_API_KEY": "test-key"}):
-            sentences = verbalize_llm([Triplet("victim", "can file", "an online complaint")])
+            with mock.patch.dict(sys.modules, {"openai": fake_openai}):
+                sentences = verbalize_llm([Triplet("victim", "can file", "an online complaint")])
 
         self.assertEqual(sentences, ["A victim can file an online complaint."])
         mock_client.chat.completions.create.assert_called_once()
         call_kwargs = mock_client.chat.completions.create.call_args.kwargs
         self.assertEqual(call_kwargs["model"], "test-model")
+
+
+class TestEvidenceSynthesis(unittest.TestCase):
+    def _candidates(self) -> list[KnowledgeCandidate]:
+        return [
+            KnowledgeCandidate(
+                text="KIRAN, the national mental health helpline 1800-599-0019, offers 24x7 distress support in India.",
+                source="counseling_bank",
+                url="https://www.mohfw.gov.in/",
+                domain="clinical",
+            ),
+            KnowledgeCandidate(
+                text="A victim can file an FIR at the nearest police station.",
+                source="static_dataset",
+            ),
+        ]
+
+    @mock.patch.dict(os.environ, {}, clear=True)
+    def test_llm_falls_back_to_concatenation_without_api_key(self):
+        from ktc.synthesis import synthesize_evidence
+
+        result = synthesize_evidence(self._candidates(), "user: I am going insane.")
+        self.assertFalse(result.used_llm)
+        self.assertIn("1800-599-0019", result.text)
+        self.assertIn("FIR", result.text)
+        self.assertIn("KIRAN", result.text)
+
+    def test_template_backend_concatenates(self):
+        from ktc.synthesis import synthesize_evidence
+
+        result = synthesize_evidence(
+            self._candidates(),
+            "user: I am going insane.",
+            backend="template",
+        )
+        self.assertFalse(result.used_llm)
+        self.assertTrue(result.text.startswith("KIRAN"))
+        self.assertIn("police station", result.text.lower())
+
+    @mock.patch("ktc.synthesis._make_llm_client")
+    def test_llm_synthesis_uses_chat_api(self, mock_make_client):
+        from ktc.synthesis import DEFAULT_SYNTHESIS_MODEL, synthesize_evidence
+
+        grounded = (
+            "KIRAN, the national mental health helpline 1800-599-0019, offers 24x7 distress "
+            "support in India. A victim can file an FIR at the nearest police station."
+        )
+        mock_client = mock.Mock()
+        mock_response = mock.Mock()
+        mock_response.choices = [mock.Mock(message=mock.Mock(content=grounded))]
+        mock_client.chat.completions.create.return_value = mock_response
+        mock_make_client.return_value = (mock_client, LiveRetrievalConfig(llm_model="ignored-model"))
+
+        fake_openai = mock.Mock()
+        with mock.patch.dict(os.environ, {"LLM_API_KEY": "ollama"}):
+            with mock.patch.dict(sys.modules, {"openai": fake_openai}):
+                result = synthesize_evidence(self._candidates(), "user: I am going insane.")
+
+        self.assertTrue(result.used_llm)
+        self.assertEqual(result.text, grounded if grounded.endswith(".") else grounded + ".")
+        mock_client.chat.completions.create.assert_called_once()
+        call_kwargs = mock_client.chat.completions.create.call_args.kwargs
+        self.assertEqual(call_kwargs["model"], DEFAULT_SYNTHESIS_MODEL)
+        self.assertEqual(call_kwargs["temperature"], 0)
+        self.assertEqual(call_kwargs["max_tokens"], 2048)
+        self.assertIn("1800-599-0019", call_kwargs["messages"][1]["content"])
+        system_prompt = call_kwargs["messages"][0]["content"]
+        self.assertIn("You are given a numbered list of candidate facts below", system_prompt)
+        self.assertIn("NOT to select a subset", system_prompt)
+        self.assertIn("do not drop any fact's core content", system_prompt)
+        self.assertIn("Do not select a subset", call_kwargs["messages"][1]["content"])
+
+    @mock.patch("ktc.synthesis._make_llm_client")
+    def test_grounding_check_rejects_hallucinated_phone(self, mock_make_client):
+        from ktc.synthesis import synthesize_evidence
+
+        hallucinated = (
+            "Call iCall on 9152987821 and KIRAN on 1800-599-0019 for distress support."
+        )
+        mock_client = mock.Mock()
+        mock_response = mock.Mock()
+        mock_response.choices = [mock.Mock(message=mock.Mock(content=hallucinated))]
+        mock_client.chat.completions.create.return_value = mock_response
+        mock_make_client.return_value = (mock_client, LiveRetrievalConfig())
+
+        fake_openai = mock.Mock()
+        with mock.patch.dict(os.environ, {"LLM_API_KEY": "ollama"}):
+            with mock.patch.dict(sys.modules, {"openai": fake_openai}):
+                result = synthesize_evidence(self._candidates(), "user: I am going insane.")
+
+        self.assertFalse(result.used_llm)
+        self.assertNotIn("9152987821", result.text)
+        self.assertIn("1800-599-0019", result.text)
+        self.assertIn("FIR", result.text)
+
+    @mock.patch("ktc.synthesis._make_llm_client")
+    def test_malformed_output_falls_back(self, mock_make_client):
+        from ktc.synthesis import synthesize_evidence
+
+        mock_client = mock.Mock()
+        mock_response = mock.Mock()
+        mock_response.choices = [mock.Mock(message=mock.Mock(content=""))]
+        mock_client.chat.completions.create.return_value = mock_response
+        mock_make_client.return_value = (mock_client, LiveRetrievalConfig())
+
+        fake_openai = mock.Mock()
+        with mock.patch.dict(os.environ, {"LLM_API_KEY": "ollama"}):
+            with mock.patch.dict(sys.modules, {"openai": fake_openai}):
+                result = synthesize_evidence(self._candidates(), "user: help")
+
+        self.assertFalse(result.used_llm)
+        self.assertIn("KIRAN", result.text)
+
+    def test_coverage_gap_logs_dropped_phone_fact(self):
+        from ktc.synthesis import log_coverage_gaps
+
+        candidates = self._candidates() + [
+            KnowledgeCandidate(
+                text="iCall psychosocial helpline 9152987821 provides confidential counseling.",
+                source="counseling_bank",
+            )
+        ]
+        passage = (
+            "KIRAN, the national mental health helpline 1800-599-0019, offers 24x7 distress "
+            "support in India. A victim can file an FIR at the nearest police station."
+        )
+        with mock.patch("ktc.synthesis.logger") as mock_logger:
+            gaps = log_coverage_gaps(passage, candidates)
+        self.assertEqual(len(gaps), 1)
+        self.assertIn("9152987821", gaps[0])
+        warning_messages = [call.args[0] for call in mock_logger.warning.call_args_list]
+        self.assertTrue(any("synthesis_coverage_gap" in msg for msg in warning_messages))
+        self.assertTrue(any("9152987821" in str(call.args) for call in mock_logger.warning.call_args_list))
+
+    def test_coverage_gap_silent_when_all_tokens_present(self):
+        from ktc.synthesis import log_coverage_gaps
+
+        candidates = self._candidates() + [
+            KnowledgeCandidate(
+                text="iCall psychosocial helpline 9152987821 provides confidential counseling.",
+                source="counseling_bank",
+            )
+        ]
+        passage = (
+            "KIRAN 1800-599-0019 and iCall 9152987821 offer distress support. "
+            "A victim can file an FIR at the nearest police station."
+        )
+        with mock.patch("ktc.synthesis.logger") as mock_logger:
+            gaps = log_coverage_gaps(passage, candidates)
+        self.assertEqual(gaps, [])
+        mock_logger.warning.assert_not_called()
+
+    @mock.patch("ktc.synthesis._make_llm_client")
+    def test_successful_synthesis_logs_coverage_gap_for_dropped_fact(self, mock_make_client):
+        from ktc.synthesis import synthesize_evidence
+
+        candidates = self._candidates() + [
+            KnowledgeCandidate(
+                text="iCall psychosocial helpline 9152987821 provides confidential counseling.",
+                source="counseling_bank",
+            )
+        ]
+        trimmed = (
+            "KIRAN, the national mental health helpline 1800-599-0019, offers 24x7 distress "
+            "support in India. A victim can file an FIR at the nearest police station."
+        )
+        mock_client = mock.Mock()
+        mock_response = mock.Mock()
+        mock_response.choices = [mock.Mock(message=mock.Mock(content=trimmed))]
+        mock_client.chat.completions.create.return_value = mock_response
+        mock_make_client.return_value = (mock_client, LiveRetrievalConfig())
+
+        fake_openai = mock.Mock()
+        with mock.patch.dict(os.environ, {"LLM_API_KEY": "ollama"}):
+            with mock.patch.dict(sys.modules, {"openai": fake_openai}):
+                with self.assertLogs("ktc.synthesis", level="WARNING") as captured:
+                    result = synthesize_evidence(candidates, "user: I am going insane.")
+
+        self.assertFalse(result.used_llm)
+        self.assertIn("9152987821", result.text)
+        self.assertTrue(any("synthesis_coverage_gap" in line and "9152987821" in line for line in captured.output))
+        self.assertTrue(any("falling back to concatenated evidence" in line for line in captured.output))
+
+    @mock.patch("ktc.synthesis._make_llm_client")
+    def test_incomplete_llm_output_falls_back_and_reports_missing_indices(self, mock_make_client):
+        from ktc.synthesis import completeness_report, synthesize_evidence
+
+        candidates = [
+            KnowledgeCandidate(text="KIRAN, the national mental health helpline 1800-599-0019, offers 24x7 distress support in India.", source="counseling_bank"),
+            KnowledgeCandidate(text="A victim can file an FIR at the nearest police station.", source="static_dataset"),
+            KnowledgeCandidate(text="iCall psychosocial helpline 9152987821 provides confidential counseling for people in emotional distress.", source="counseling_bank"),
+            KnowledgeCandidate(text="Rape is a cognizable offence under IPC Section 376; a survivor can file an FIR and seek medical and legal aid without delay.", source="counseling_bank"),
+            KnowledgeCandidate(text="Gang rape is an aggravated offence under IPC Section 376D; a delayed FIR is still valid and a survivor can request a medical examination and police protection.", source="counseling_bank"),
+            KnowledgeCandidate(text="You do not have to file a police case before getting emotional support; 181 or NALSA legal aid can help if you later need legal information or protection.", source="counseling_bank"),
+            KnowledgeCandidate(text="You can ask for help even if you are not sure what the problem is called; a counselor can listen first.", source="counseling_bank"),
+            KnowledgeCandidate(text="iCall psychosocial helpline, Tata Institute of Social Sciences, offers telephone counseling services.", source="live_sentence_direct"),
+        ]
+        trimmed = (
+            "KIRAN, the national mental health helpline 1800-599-0019, offers 24x7 distress support in India. "
+            "A victim can file an FIR at the nearest police station. "
+            "iCall psychosocial helpline 9152987821 provides confidential counseling for people in emotional distress. "
+            "Rape is a cognizable offence under IPC Section 376; a survivor can file an FIR and seek medical and legal aid without delay. "
+            "iCall psychosocial helpline, Tata Institute of Social Sciences, offers telephone counseling services."
+        )
+        report = completeness_report(trimmed, candidates)
+        missing = [index for index, covered, _preview in report if not covered]
+        self.assertEqual(missing, [4, 5, 6])
+
+        mock_client = mock.Mock()
+        mock_response = mock.Mock()
+        mock_response.choices = [mock.Mock(message=mock.Mock(content=trimmed))]
+        mock_client.chat.completions.create.return_value = mock_response
+        mock_make_client.return_value = (mock_client, LiveRetrievalConfig())
+
+        fake_openai = mock.Mock()
+        with mock.patch.dict(os.environ, {"LLM_API_KEY": "ollama"}):
+            with mock.patch.dict(sys.modules, {"openai": fake_openai}):
+                with self.assertLogs("ktc.synthesis", level="INFO") as captured:
+                    result = synthesize_evidence(candidates, "victim: I was gang raped and need help.")
+
+        self.assertFalse(result.used_llm)
+        self.assertIn("376D", result.text)
+        self.assertIn("NALSA", result.text)
+        self.assertIn("listen first", result.text)
+        joined_logs = "\n".join(captured.output)
+        self.assertIn("completeness_check candidate=4 covered=False", joined_logs)
+        self.assertIn("completeness_check candidate=5 covered=False", joined_logs)
+        self.assertIn("completeness_check candidate=6 covered=False", joined_logs)
+        self.assertIn("missing_indices=[4, 5, 6]", joined_logs)
+
+    def test_pipeline_synthesize_defaults_off(self):
+        from ktc.pipeline import KnowledgeTripletPipeline
+        from ktc.ranking import CandidateRankingResult
+
+        class _PassthroughRanker:
+            model = None
+
+            def rank_candidates_with_scores(self, dialog_history, candidates, top_k=26):
+                cl = list(candidates)
+                scores = [0.9] * len(cl)
+                return CandidateRankingResult(cl[:top_k], scores[:top_k], 0.9 if cl else 0.0)
+
+        pipeline = KnowledgeTripletPipeline(
+            verbalization_backend="template",
+            coref_backend="heuristic",
+            ranker=_PassthroughRanker(),
+            min_cosine=0.0,
+        )
+        result = pipeline.run_hybrid(
+            "Victims can file a complaint online.",
+            "agent: Hi. victim: I need help filing a complaint.",
+            enable_live=False,
+        )
+        self.assertIsNone(result.synthesized_knowledge)
+
+    def test_pipeline_synthesize_true_fills_field(self):
+        from ktc.pipeline import KnowledgeTripletPipeline
+        from ktc.ranking import CandidateRankingResult
+
+        class _EmptyRanker:
+            model = None
+
+            def rank_candidates_with_scores(self, dialog_history, candidates, top_k=26):
+                cl = list(candidates)
+                scores = [0.9] * len(cl)
+                return CandidateRankingResult(cl[:top_k], scores[:top_k], 0.9 if cl else 0.0)
+
+        pipeline = KnowledgeTripletPipeline(
+            verbalization_backend="template",
+            coref_backend="heuristic",
+            ranker=_EmptyRanker(),
+            min_cosine=0.0,
+        )
+        with mock.patch.dict(os.environ, {}, clear=True):
+            result = pipeline.run_hybrid(
+                "Victims can file a complaint online.",
+                "agent: Hi. victim: I need help filing a complaint.",
+                enable_live=False,
+                synthesize=True,
+            )
+        self.assertIsNotNone(result.synthesized_knowledge)
+        self.assertNotEqual(result.final_knowledge_sources, ["llm_synthesis"])
+
+    def _passthrough_pipeline(self):
+        from ktc.pipeline import KnowledgeTripletPipeline
+        from ktc.ranking import CandidateRankingResult
+
+        class _PassthroughRanker:
+            model = None
+
+            def rank_candidates_with_scores(self, dialog_history, candidates, top_k=26):
+                cl = list(candidates)
+                scores = [0.9] * len(cl)
+                return CandidateRankingResult(cl[:top_k], scores[:top_k], 0.9 if cl else 0.0)
+
+        return KnowledgeTripletPipeline(
+            verbalization_backend="template",
+            coref_backend="heuristic",
+            ranker=_PassthroughRanker(),
+            min_cosine=0.0,
+        )
+
+    @mock.patch("ktc.pipeline.synthesize_evidence")
+    def test_final_knowledge_uses_successful_llm_synthesis(self, mock_synth):
+        from ktc.synthesis import SynthesisResult
+
+        synthesized = "A survivor can file an FIR and seek free legal aid."
+        mock_synth.return_value = SynthesisResult(text=synthesized, used_llm=True)
+        result = self._passthrough_pipeline().run_hybrid(
+            "Victims can file a complaint online.",
+            "agent: Hi. victim: I need help filing a complaint.",
+            enable_live=False,
+            synthesize=True,
+        )
+        self.assertEqual(result.synthesized_knowledge, synthesized)
+        self.assertEqual(result.final_knowledge_text, synthesized)
+        self.assertEqual(result.final_knowledge_sources, ["llm_synthesis"])
+
+    @mock.patch("ktc.pipeline.synthesize_evidence")
+    def test_final_knowledge_falls_back_when_synthesis_fails(self, mock_synth):
+        from ktc.synthesis import SynthesisResult
+
+        mock_synth.return_value = SynthesisResult(text="concatenated fallback blob", used_llm=False)
+        result = self._passthrough_pipeline().run_hybrid(
+            "Victims can file a complaint online.",
+            "agent: Hi. victim: I need help filing a complaint.",
+            enable_live=False,
+            synthesize=True,
+        )
+        self.assertEqual(result.synthesized_knowledge, "concatenated fallback blob")
+        self.assertEqual(result.final_knowledge_text, "concatenated fallback blob")
+        self.assertEqual(result.final_knowledge_sources, ["concatenation_fallback"])
 
 
 class TestCoreference(unittest.TestCase):
@@ -300,6 +664,33 @@ class TestCoreference(unittest.TestCase):
             chosen = _pick_antecedent(sents, sent_idx=2, pronoun_char=None, pronoun_class="fem")
         self.assertEqual(chosen, "Priya")
 
+    def test_single_candidate_fallback_skips_neuter_pronoun(self):
+        from ktc.coreference import _pick_antecedent
+
+        class Root:
+            def __init__(self, pos_, ent_type_=""):
+                self.pos_ = pos_
+                self.ent_type_ = ent_type_
+                self.morph = type("Morph", (), {"get": lambda self, key: []})()
+
+        class Chunk:
+            def __init__(self, text, pos_, ent_type_=""):
+                self.text = text
+                self.root = Root(pos_, ent_type_)
+
+            def __iter__(self):
+                return iter(())
+
+        portal = Chunk("the Cyber Cell", "NOUN")
+        mistagged_it = Chunk("It", "NOUN")
+        sents = [[portal], [mistagged_it], []]
+        with mock.patch(
+            "ktc.coreference._collect_candidates",
+            side_effect=lambda sent_doc, before_char=None: list(sent_doc),
+        ):
+            chosen = _pick_antecedent(sents, sent_idx=2, pronoun_char=None, pronoun_class="neuter")
+        self.assertEqual(chosen, "the Cyber Cell")
+
     def test_ambiguous_gender_requires_person_antecedent(self):
         knowledge = "The portal and Maria are available. He filed a complaint."
         raw = [Triplet("He", "filed", "a complaint")]
@@ -316,21 +707,23 @@ class TestCoreference(unittest.TestCase):
         self.assertEqual(resolved[0].head, "It")
 
     def test_no_document_global_fallback_on_real_dialogues(self):
-        if not DATA_PATH.exists():
-            self.skipTest("KARE.jsonl not available (set KARE_JSONL_PATH)")
+        path = DATA_PATH if DATA_PATH.exists() else SAMPLE_PATH
+        if not path.exists():
+            self.skipTest("KARE.jsonl / KARE-Sample.json not available")
 
         from ktc.cleaning import clean_knowledge_text
 
         for did in ("100", "3000", "4500"):
             with self.subTest(dialogue_id=did):
                 dialogue = None
-                with DATA_PATH.open(encoding="utf-8") as f:
+                with path.open(encoding="utf-8") as f:
                     for line in f:
                         record = json.loads(line)
                         if str(record["dialogue_id"]) == did:
                             dialogue = record
                             break
-                self.assertIsNotNone(dialogue)
+                if dialogue is None:
+                    self.skipTest(f"dialogue {did} not in {path}")
                 cleaned = clean_knowledge_text(dialogue["knowledge"])
                 raw = extract_triplets(cleaned, nlp=self.nlp)
                 resolved = resolve_coreferences(raw, cleaned, nlp=self.nlp)
@@ -352,6 +745,50 @@ class TestRanking(unittest.TestCase):
     def test_stable_rank_order_empty(self):
         order = _stable_rank_order(np.array([]), top_k=5)
         self.assertEqual(len(order), 0)
+
+    def test_score_gate_drops_weak_matches(self):
+        pool = [
+            KnowledgeCandidate(text="relevant FIR procedure", source="static_dataset"),
+            KnowledgeCandidate(text="unrelated yoga tip", source="static_dataset"),
+        ]
+        kept, scores, top1 = apply_score_gate(pool, [0.51, 0.21], min_cosine=0.38, top_k=5)
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(kept[0].text, "relevant FIR procedure")
+        self.assertAlmostEqual(top1, 0.51)
+        self.assertEqual(scores, [0.51])
+
+    def test_score_gate_empty_when_none_pass(self):
+        pool = [KnowledgeCandidate(text="noise", source="static_dataset")]
+        kept, scores, top1 = apply_score_gate(pool, [0.22], min_cosine=0.38, top_k=5)
+        self.assertEqual(kept, [])
+        self.assertEqual(scores, [])
+        self.assertAlmostEqual(top1, 0.22)
+
+    def test_fact_embeddings_are_cached_across_calls(self):
+        from ktc.passages import select_relevant_passages
+        from ktc.ranking import clear_text_embedding_cache
+
+        clear_text_embedding_cache()
+        model = mock.Mock()
+        model.encode.side_effect = lambda texts, **kwargs: np.ones((len(list(texts)), 4), dtype=float)
+        ranker = mock.Mock(model=model)
+        facts = [
+            "KIRAN, the national mental health helpline 1800-599-0019, offers 24x7 distress support in India."
+        ]
+        first = select_relevant_passages(facts, "women helpline support", ranker, min_cosine=0.0)
+        first_calls = model.encode.call_count
+        self.assertGreater(first_calls, 0)
+        second = select_relevant_passages(facts, "women helpline support", ranker, min_cosine=0.0)
+        self.assertEqual(model.encode.call_count, first_calls)
+        self.assertEqual(len(first), len(second))
+
+    def test_ranking_query_ignores_bot_greeting(self):
+        history = "agent: Greetings from Rakshak. user: my husband threatened to murder me."
+        with mock.patch("ktc.entity_extraction.extract_entities", return_value=[{"text": "murder", "category": "crime"}]):
+            query = ranking_query_from_history(history)
+        self.assertNotIn("Rakshak", query)
+        self.assertIn("murder", query.lower())
+        self.assertIn("husband", query.lower())
 
     def test_mixed_pool_ranking_no_length_bias(self):
         """Static and live candidates with equal relevance should both appear in top-k."""
@@ -439,11 +876,12 @@ class TestLiveConfig(unittest.TestCase):
         config = LiveRetrievalConfig.load()
         self.assertTrue(all(d == d.lower() for d in config.trusted_domains))
         self.assertIn("icallhelpline.org", config.trusted_domains)
+        self.assertIn("indiankanoon.org", config.trusted_domains)
 
-    def test_groq_llm_api_base_from_config(self):
+    def test_llm_api_base_from_config(self):
         config = LiveRetrievalConfig.load()
-        self.assertEqual(config.llm_model, "openai/gpt-oss-120b")
-        self.assertEqual(config.llm_api_base, "https://api.groq.com/openai/v1")
+        self.assertEqual(config.llm_model, "qwen2.5:3b-instruct")
+        self.assertEqual(config.llm_api_base, "http://localhost:11434/v1")
 
     def test_api_call_budget(self):
         budget = ApiCallBudget(2)
@@ -451,6 +889,16 @@ class TestLiveConfig(unittest.TestCase):
         budget.record(1)
         budget.record(1)
         self.assertFalse(budget.can_call())
+
+    def test_loaded_live_timeouts(self):
+        config = LiveRetrievalConfig.load()
+        self.assertEqual(config.page_fetch_timeout, 8)
+        self.assertEqual(config.search_timeout, 10)
+        self.assertEqual(config.max_live_retrieval_seconds, 20)
+        self.assertEqual(config.max_concurrent_fetches, 4)
+        self.assertEqual(config.max_concurrent_queries, 3)
+        self.assertEqual(config.live_sentence_candidates_per_page, 8)
+        self.assertEqual(config.live_sentence_top_k, 8)
 
 
 class TestLiveRetrieval(unittest.TestCase):
@@ -478,6 +926,24 @@ class TestLiveRetrieval(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertIn("cybercrime.gov.in", results[0].domain)
 
+    @mock.patch("ktc.live_retrieval._search_tavily")
+    def test_search_allowlisted_skips_pdf_and_bitstream(self, mock_search):
+        mock_search.return_value = [
+            {"url": "https://indiacode.nic.in/bitstream/123/act.pdf", "title": "PDF", "content": "is not rape"},
+            {"url": "https://indiacode.nic.in/a376.html", "title": "HTML", "content": "Section 376"},
+        ]
+        config = LiveRetrievalConfig(
+            trusted_domains=["indiacode.nic.in"],
+            results_per_query=3,
+            search_provider="tavily",
+        )
+        with mock.patch.dict(os.environ, {"LIVE_SEARCH_API_KEY": "test-key"}):
+            from ktc.live_retrieval import search_allowlisted
+
+            results = search_allowlisted("IPC 376 pdf skip", config, cache_dir=Path(tempfile.mkdtemp()))
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0].url.endswith(".html"))
+
     @mock.patch("requests.get")
     def test_fetch_page_text_uses_url_cache(self, mock_get):
         import uuid
@@ -496,6 +962,94 @@ class TestLiveRetrieval(unittest.TestCase):
         self.assertIn("9152987821", first)
         self.assertEqual(first, second)
         mock_get.assert_called_once()
+
+    @mock.patch("requests.get")
+    def test_failed_url_is_skipped_on_second_fetch(self, mock_get):
+        import uuid
+
+        from ktc.live_retrieval import fetch_page_text
+
+        mock_get.side_effect = TimeoutError("slow domain")
+        url = f"https://indiacode.nic.in/fail-{uuid.uuid4().hex}"
+        cache_dir = Path(tempfile.mkdtemp())
+        with self.assertRaises(TimeoutError):
+            fetch_page_text(url, cache_dir=cache_dir, timeout=1, failure_cache_ttl_days=1)
+        second = fetch_page_text(url, cache_dir=cache_dir, timeout=1, failure_cache_ttl_days=1)
+        self.assertEqual(second, "")
+        self.assertEqual(mock_get.call_count, 1)
+
+    def test_page_fetch_failure_logs_distinct_reasons(self):
+        import uuid
+        import requests
+
+        from ktc.live_retrieval import fetch_page_text
+
+        cache_dir = Path(tempfile.mkdtemp())
+        timeout_url = f"https://indiacode.nic.in/timeout-{uuid.uuid4().hex}"
+        conn_url = f"https://indiacode.nic.in/conn-{uuid.uuid4().hex}"
+        with mock.patch("requests.get", side_effect=requests.Timeout("slow")):
+            with self.assertLogs("ktc.live_retrieval", level="WARNING") as cm:
+                with self.assertRaises(requests.Timeout):
+                    fetch_page_text(timeout_url, cache_dir=cache_dir, timeout=1)
+        self.assertTrue(any("reason=timeout" in line for line in cm.output))
+        with mock.patch("requests.get", side_effect=requests.ConnectionError("refused")):
+            with self.assertLogs("ktc.live_retrieval", level="WARNING") as cm:
+                with self.assertRaises(requests.ConnectionError):
+                    fetch_page_text(conn_url, cache_dir=cache_dir, timeout=1)
+        self.assertTrue(any("reason=connection_error" in line for line in cm.output))
+
+    @mock.patch("ktc.live_retrieval.fetch_page_text")
+    def test_concurrent_enrich_keeps_per_url_attribution(self, mock_fetch):
+        from ktc.live_retrieval import SearchResult, enrich_search_results
+
+        def _page(url, **kwargs):
+            if "good" in url:
+                return "KIRAN helpline 1800-599-0019 offers 24x7 support in India for people in distress."
+            raise ConnectionError("down")
+
+        mock_fetch.side_effect = _page
+        results = [
+            SearchResult(url="https://ncw.nic.in/good", title="ok", snippet="short", domain="ncw.nic.in"),
+            SearchResult(url="https://indiacode.nic.in/bad", title="bad", snippet="thin", domain="indiacode.nic.in"),
+        ]
+        config = LiveRetrievalConfig(max_concurrent_fetches=2, page_fetch_timeout=8)
+        enriched = enrich_search_results(results, config)
+        self.assertEqual(len(enriched), 2)
+        self.assertIn("1800-599-0019", enriched[0].snippet)
+        self.assertEqual(enriched[0].url, "https://ncw.nic.in/good")
+        self.assertEqual(enriched[1].url, "https://indiacode.nic.in/bad")
+        self.assertEqual(enriched[1].snippet, "thin")
+
+    def test_api_budget_holds_under_concurrent_record(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        budget = ApiCallBudget(5)
+
+        def worker():
+            for _ in range(20):
+                budget.record(1)
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(lambda _: worker(), range(8)))
+        self.assertEqual(budget.used, 5)
+        self.assertFalse(budget.can_call())
+
+    def test_live_deadline_returns_before_slow_fetch_finishes(self):
+        from ktc.live_retrieval import LiveDeadline, run_io_tasks
+
+        deadline = LiveDeadline(0.25)
+        release = threading.Event()
+
+        def slow():
+            release.wait(timeout=5)
+            return "too-late"
+
+        started = time.monotonic()
+        results = run_io_tasks([slow, slow], max_workers=2, deadline=deadline)
+        elapsed = time.monotonic() - started
+        release.set()
+        self.assertLess(elapsed, 1.5)
+        self.assertTrue(all(item is None for item in results))
 
 
 class TestLiveSummarize(unittest.TestCase):
@@ -550,18 +1104,20 @@ class TestLiveSummarize(unittest.TestCase):
         self.assertIn("Section 506", parsed[0])
         self.assertIn("1930", parsed[1])
 
-    def test_parse_sentences_keeps_dialogue_100_style_facts(self):
+    def test_parse_sentences_drops_statistical_who_prose(self):
         from ktc.live_summarize import _parse_sentences
 
-        facts = [
+        dropped = [
             "The World Health Organization estimates the age-adjusted suicide rate per 100 000 population in India is 21.1.",
             "The burden of mental health problems in India is 2443 disability-adjusted life years (DALYs) per 100 000 population.",
             "The economic loss due to mental health conditions in India, between 2012-2030, is estimated at USD 1.03 trillion.",
             "Policy makers are encouraged to promote availability of and access to cost-effective treatment of common mental disorders at the primary health care level.",
         ]
-        for fact in facts:
-            parsed = _parse_sentences(fact)
-            self.assertEqual(parsed, [fact], msg=fact)
+        for fact in dropped:
+            self.assertEqual(_parse_sentences(fact), [], msg=fact)
+
+        kept = "The KIRAN helpline 1800-599-0019 provides 24x7 mental health support in India."
+        self.assertEqual(_parse_sentences(kept), [kept])
 
     def test_per_source_attribution(self):
         import sys
@@ -622,7 +1178,10 @@ class TestLiveSummarize(unittest.TestCase):
         ]
         config = LiveRetrievalConfig(summarize_backend="extractive", results_per_query=1)
         with mock.patch.dict(os.environ, {"LLM_API_KEY": ""}, clear=False):
-            with mock.patch("ktc.live_summarize.enrich_search_result", side_effect=lambda r, **k: r):
+            with mock.patch(
+                "ktc.live_summarize.enrich_search_results",
+                side_effect=lambda results, config, **k: list(results),
+            ):
                 sentences = summarize_search_results(
                     "IPC Section 376 rape India", results, config
                 )
@@ -630,6 +1189,41 @@ class TestLiveSummarize(unittest.TestCase):
         self.assertEqual(sentences[0].source_url, "https://indiacode.nic.in/376")
         self.assertIn("376", sentences[0].sentence)
         self.assertIn("rape", sentences[0].sentence.lower())
+
+    def test_extractive_sentences_skip_policy_maker_lines(self):
+        from ktc.live_summarize import extractive_sentences
+
+        text = (
+            "Policy makers should be encouraged to promote availability of and access to "
+            "cost-effective treatment of common mental disorders at the primary health care level. "
+            "KIRAN is a 24x7 mental health helpline 1800-599-0019 operated for distress support in India."
+        )
+        selected = extractive_sentences("mental health helpline India", text)
+        joined = " ".join(selected).lower()
+        self.assertNotIn("policy makers", joined)
+        self.assertTrue("kiran" in joined or "1800" in joined)
+
+    def test_extractive_sentences_skip_nav_footer(self):
+        from ktc.live_summarize import extractive_sentences
+
+        text = (
+            "EMAIL US AT icall@tiss.edu We Mental Health & Psychosocial Support – iCALL | "
+            "MON - SAT 10am - 8pm. KIRAN is a 24x7 mental health helpline 1800-599-0019 in India."
+        )
+        selected = extractive_sentences("KIRAN helpline India", text)
+        joined = " ".join(selected).lower()
+        self.assertNotIn("email us at", joined)
+        self.assertNotIn("mon - sat", joined)
+
+    def test_is_scraped_boilerplate(self):
+        from ktc.live_summarize import is_scraped_boilerplate
+
+        self.assertTrue(
+            is_scraped_boilerplate(
+                "EMAIL US AT icall@tiss.edu We Mental Health & Psychosocial Support – iCALL"
+            )
+        )
+        self.assertFalse(is_scraped_boilerplate("KIRAN is a 24x7 mental health helpline in India."))
 
 
 class TestLiveKnowledge(unittest.TestCase):
@@ -666,12 +1260,74 @@ class TestLiveKnowledge(unittest.TestCase):
         ]
         config = LiveRetrievalConfig(enable_live_retrieval=True, max_live_queries_per_dialogue=1)
         budget = ApiCallBudget(10)
-        candidates, queries, raw = fetch_live_knowledge(
+        candidates, queries, raw, _funnel = fetch_live_knowledge(
             "my husband threatens me", config, budget
         )
-        self.assertEqual(len(candidates), 1)
+        self.assertTrue(queries)
+        self.assertEqual(len(raw), 1)
+        self.assertTrue(candidates)
         self.assertEqual(candidates[0].source, "live_api")
         self.assertEqual(candidates[0].url, "https://ncw.nic.in/h")
+        self.assertIsNotNone(candidates[0].triplet)
+
+    @mock.patch("ktc.live_knowledge.summarize_search_results")
+    @mock.patch("ktc.live_knowledge.search_allowlisted")
+    def test_fetch_live_drops_nav_footer_and_keeps_triplets(self, mock_search, mock_summarize):
+        mock_search.return_value = [
+            SearchResult(url="https://icallhelpline.org/", title="iCall", snippet="s", domain="icallhelpline.org"),
+        ]
+        from ktc.live_summarize import LiveKnowledgeSentence
+
+        mock_summarize.return_value = [
+            LiveKnowledgeSentence(
+                sentence="EMAIL US AT icall@tiss.edu We Mental Health & Psychosocial Support – iCALL | MON - SAT 10am - 8pm",
+                source_url="https://icallhelpline.org/",
+                query="iCall helpline India",
+            ),
+            LiveKnowledgeSentence(
+                sentence="The NCW helpline number is 7827170170.",
+                source_url="https://icallhelpline.org/",
+                query="iCall helpline India",
+            ),
+        ]
+        config = LiveRetrievalConfig(enable_live_retrieval=True, max_live_queries_per_dialogue=1)
+        candidates, _queries, _raw, _funnel = fetch_live_knowledge(
+            "I am going insane where to go for help", config, ApiCallBudget(10)
+        )
+        joined = " ".join(c.text.lower() for c in candidates)
+        self.assertNotIn("email us at", joined)
+        self.assertNotIn("mon - sat", joined)
+        self.assertTrue(candidates)
+        self.assertTrue(all(c.triplet is not None for c in candidates))
+
+    def test_fetch_live_knowledge_respects_time_budget(self):
+        from ktc.query_builder import SearchQuery
+
+        release = threading.Event()
+
+        def slow_search(*args, **kwargs):
+            release.wait(timeout=5)
+            return []
+
+        config = LiveRetrievalConfig(
+            enable_live_retrieval=True,
+            max_live_queries_per_dialogue=3,
+            max_concurrent_queries=3,
+            max_live_retrieval_seconds=0.3,
+        )
+        queries = [
+            SearchQuery("q1", "rape", "crime", "crime_report_india"),
+            SearchQuery("q2", "rape", "crime", "crime_statute_indiacode"),
+            SearchQuery("q3", "helpline", "mental_health", "mh_crisis_helpline"),
+        ]
+        started = time.monotonic()
+        with mock.patch("ktc.live_knowledge.search_allowlisted", side_effect=slow_search):
+            with mock.patch("ktc.live_knowledge.build_queries", return_value=queries):
+                with mock.patch("ktc.live_knowledge.extract_entities", return_value=[]):
+                    fetch_live_knowledge("urgent rape help", config, ApiCallBudget(10), enabled=True)
+        elapsed = time.monotonic() - started
+        release.set()
+        self.assertLess(elapsed, 1.5)
 
     def test_static_candidates_from_triplets(self):
         t = Triplet("victim", "can file", "complaint")
@@ -679,6 +1335,193 @@ class TestLiveKnowledge(unittest.TestCase):
         self.assertEqual(len(candidates), 1)
         self.assertEqual(candidates[0].source, "static_dataset")
         self.assertIsNotNone(candidates[0].triplet)
+
+    def test_sentence_relevance_works_when_openie_empty(self):
+        from ktc.live_knowledge import sentence_relevance_candidates
+        from ktc.live_summarize import LivePageStats
+
+        pages = [
+            LivePageStats(
+                url="https://icallhelpline.org/",
+                query="KIRAN mental health helpline India",
+                sentences_extracted=2,
+                sentences=[
+                    "KIRAN is a 24x7 mental health helpline 1800-599-0019 operated for distress support in India.",
+                    "The campus newsletter mentions a sports meet at IIT Bombay this weekend.",
+                ],
+            )
+        ]
+
+        class _QueryRanker:
+            def cosine_to_query(self, query, texts):
+                scores = []
+                for text in texts:
+                    scores.append(0.81 if "helpline" in text.lower() else 0.11)
+                return scores
+
+        with mock.patch("ktc.live_knowledge.extract_triplets", return_value=[]):
+            candidates = sentence_relevance_candidates(
+                pages, _QueryRanker(), min_cosine=0.38, top_k_per_page=3
+            )
+        joined = " ".join(c.text for c in candidates)
+        self.assertIn("1800-599-0019", joined)
+        self.assertNotIn("IIT Bombay", joined)
+        self.assertTrue(all(c.extraction_method == "sentence_relevance" for c in candidates))
+
+    def test_sentence_relevance_encodes_all_pages_in_one_batch(self):
+        from ktc.live_knowledge import sentence_relevance_candidates
+        from ktc.live_summarize import LivePageStats
+        from ktc.ranking import clear_text_embedding_cache
+
+        clear_text_embedding_cache()
+        pages = [
+            LivePageStats(
+                url=f"https://icallhelpline.org/p{index}",
+                query=f"helpline query {index}",
+                sentences_extracted=2,
+                sentences=[
+                    f"This helpline page {index} explains confidential telephone counseling in India.",
+                    f"This second sentence on page {index} mentions distress support hours.",
+                ],
+            )
+            for index in range(3)
+        ]
+        model = mock.Mock()
+        model.encode.side_effect = lambda texts, **kwargs: np.ones((len(list(texts)), 4), dtype=float)
+        ranker = mock.Mock(model=model)
+        sentence_relevance_candidates(pages, ranker, min_cosine=0.0, top_k_per_page=8)
+        self.assertEqual(model.encode.call_count, 1)
+        encoded = list(model.encode.call_args[0][0])
+        for page in pages:
+            for sentence in page.sentences:
+                self.assertIn(sentence, encoded)
+
+    def test_openie_empty_keeps_live_sentence_direct_in_verbalized(self):
+        from ktc.live_knowledge import LiveFunnel, direct_sentence_candidates
+        from ktc.live_summarize import LivePageStats
+        from ktc.pipeline import KnowledgeTripletPipeline
+        from ktc.ranking import CandidateRankingResult
+
+        sentences = [
+            "iCALL is a psychosocial helpline that offers telephone counseling for people in emotional distress in India.",
+            "A rape survivor should be provided free medical treatment, psychological counselling, and legal aid by the state.",
+            "KIRAN is a 24x7 mental health helpline 1800-599-0019 operated for distress support in India.",
+            "Survivors can request a medical examination and police protection after reporting the offence to authorities.",
+            "Confidential counseling is available even if you are not sure what the problem is called by the counselor.",
+        ]
+        pages = [
+            LivePageStats(
+                url="https://icallhelpline.org/",
+                query="mental health helpline India",
+                sentences_extracted=5,
+                sentences=sentences,
+            )
+        ]
+
+        class _AllRelevantRanker:
+            model = None
+
+            def cosine_to_query(self, query, texts):
+                return [0.82] * len(list(texts))
+
+            def rank_candidates_with_scores(self, dialog_history, candidates, top_k=26):
+                cl = list(candidates)
+                scores = [0.9] * len(cl)
+                return CandidateRankingResult(cl[:top_k], scores[:top_k], 0.9 if cl else 0.0)
+
+        with mock.patch("ktc.live_knowledge.extract_triplets", return_value=[]):
+            extra_openie, direct = direct_sentence_candidates(
+                pages, [], _AllRelevantRanker(), nlp=None, min_cosine=0.38, top_k_per_page=8
+            )
+        self.assertEqual(extra_openie, [])
+        self.assertEqual(len(direct), 5)
+        self.assertTrue(all(c.source == "live_sentence_direct" for c in direct))
+
+        funnel = LiveFunnel(
+            live_sentences=5,
+            live_triplets=0,
+            live_sentence_relevance=5,
+            live_sentences_used_directly=5,
+        )
+        pipeline = KnowledgeTripletPipeline(
+            verbalization_backend="template",
+            coref_backend="heuristic",
+            ranker=_AllRelevantRanker(),
+            min_cosine=0.0,
+        )
+        with mock.patch(
+            "ktc.pipeline.fetch_live_knowledge",
+            return_value=(direct, [], [], funnel),
+        ):
+            result = pipeline.run_hybrid(
+                "",
+                "agent: Hi. victim: I was raped and I need a helpline and legal aid.",
+                enable_live=True,
+            )
+        self.assertGreaterEqual(len(result.verbalized), 1)
+        self.assertTrue(any(c.source == "live_sentence_direct" for c in result.ranked_candidates))
+        blob = " ".join(result.verbalized).lower()
+        self.assertTrue("helpline" in blob or "legal aid" in blob)
+        self.assertEqual(result.knowledge_funnel["live_sentences_used_directly"], 5)
+
+    def test_dedup_openie_and_sentence_relevance(self):
+        from ktc.live_knowledge import dedup_candidates
+        from ktc.pipeline import _dedup_texts
+
+        openie = KnowledgeCandidate(
+            text="KIRAN helpline 1800-599-0019 offers 24x7 support in India.",
+            source="live_api",
+            extraction_method="openie",
+        )
+        relevance = KnowledgeCandidate(
+            text="KIRAN helpline 1800-599-0019 offers 24x7 support in India",
+            source="live_api",
+            extraction_method="sentence_relevance",
+        )
+        merged = dedup_candidates([openie, relevance])
+        self.assertEqual(len(merged), 1)
+        verbalized = _dedup_texts([openie.text + ".", relevance.text])
+        self.assertEqual(len(verbalized), 1)
+
+
+class TestCitationAndSubstringDedup(unittest.TestCase):
+    def test_citation_filter_removes_docket_pattern(self):
+        from ktc.cleaning import strip_legal_citations
+        from ktc.live_summarize import split_live_sentences
+
+        raw = "A rape survivor should be provided legal aid 23 2026:JHHC:16350-DB by the state."
+        cleaned = strip_legal_citations(raw)
+        self.assertNotIn("2026:JHHC:16350-DB", cleaned)
+        self.assertNotIn("JHHC", cleaned)
+        self.assertIn("should be provided legal aid", cleaned)
+
+        page = (
+            "A rape survivor should be provided free medical treatment, psychological counselling, and legal aid. "
+            "23 2026:JHHC:16350-DB confirms the High Court directions on survivor care."
+        )
+        blob = " ".join(split_live_sentences(page))
+        self.assertNotIn("JHHC", blob)
+        self.assertNotIn("16350-DB", blob)
+
+    def test_substring_dedup_keeps_longer_clause(self):
+        from ktc.pipeline import _dedup_texts
+
+        short = "should be provided legal aid"
+        long = (
+            "should be provided free medical treatment, psychological counselling, "
+            "and legal aid"
+        )
+        kept = _dedup_texts([short, long])
+        self.assertEqual(kept, [long])
+        kept_reversed = _dedup_texts([long, short])
+        self.assertEqual(kept_reversed, [long])
+        nested = _dedup_texts(
+            [
+                "Victims should be provided legal aid.",
+                "Victims should be provided legal aid immediately.",
+            ]
+        )
+        self.assertEqual(nested, ["Victims should be provided legal aid immediately."])
 
 
 class TestKnowledgeItem(unittest.TestCase):
@@ -729,6 +1572,7 @@ class TestEntityExtraction(unittest.TestCase):
         statute = next(q for q in queries if q.template == "crime_statute_indiacode")
         self.assertIn("376", statute.text)
         self.assertIn("indiacode", statute.text.lower())
+        self.assertIn("indiankanoon", statute.text.lower())
 
     def test_murder_report_avoids_how_to_prefix(self):
         entities = [{"text": "murder", "category": CATEGORY_CRIME}]
@@ -775,6 +1619,173 @@ class TestEntityExtraction(unittest.TestCase):
         self.assertTrue(any("on instagram" in t for t in texts), msg=texts)
         self.assertFalse(any("on online" in t for t in texts))
 
+    def test_help_seeking_dialogue_constructs_contact_queries(self):
+        from ktc.query_builder import dialogue_situations
+
+        utterance = (
+            "I am going insane . I don't understand where to go and whom to ask for help ."
+        )
+        self.assertIn("help_seeking", dialogue_situations(utterance))
+        queries = build_queries(
+            [{"text": "insane", "category": CATEGORY_MENTAL_HEALTH}],
+            max_queries=3,
+            victim_text=utterance,
+        )
+        joined = " ".join(q.text.lower() for q in queries)
+        self.assertTrue(queries)
+        self.assertIn("kiran", joined)
+        self.assertRegex(joined, r"whom to contact|where to get mental health help")
+        self.assertNotIn("treatment for", joined)
+        self.assertNotIn("policy", joined)
+        self.assertNotIn("suicide prevention", joined)
+        qtexts = [q.text.lower() for q in queries]
+        self.assertFalse(any("online abuse" in t for t in qtexts))
+
+    def test_homicide_dialogue_constructs_fir_and_intimidation_queries(self):
+        utterance = "Hi Rakshak, my husband is planning to kill me with her secret"
+        queries = build_queries(
+            [{"text": "kill", "category": CATEGORY_CRIME}],
+            max_queries=3,
+            victim_text=utterance,
+        )
+        joined = " ".join(q.text.lower() for q in queries)
+        self.assertRegex(joined, r"fir|police")
+        self.assertRegex(joined, r"506|intimidation|302")
+        self.assertNotIn("what is kill under indian law", joined)
+        self.assertNotIn("romance", joined)
+
+    def test_utterance_without_lexicon_entity_still_builds_queries(self):
+        queries = build_queries(
+            [],
+            max_queries=2,
+            victim_text="I don't understand where to go and whom to ask for help.",
+        )
+        self.assertTrue(queries)
+        self.assertGreaterEqual(len(queries[0].text.split()), 4)
+        self.assertIn("helpline", queries[0].text.lower())
+
+    def test_generic_help_has_no_kiran_fallback_query(self):
+        queries = build_queries(
+            [],
+            max_queries=3,
+            victim_text="Hi..I need some urgent help.",
+        )
+        self.assertEqual(queries, [])
+
+    def test_kicked_out_dialogue_queries_pwdva(self):
+        queries = build_queries(
+            [],
+            max_queries=3,
+            victim_text="my husband has kicked me out of the house along with kids",
+        )
+        joined = " ".join(q.text.lower() for q in queries)
+        self.assertIn("residence", joined)
+        self.assertIn("domestic violence", joined)
+
+
+class TestCounselingBank(unittest.TestCase):
+    def test_bank_returns_both_domains_for_victim_utterance(self):
+        from ktc.counseling_bank import DOMAIN_CLINICAL, counseling_candidates
+
+        items = counseling_candidates(
+            [{"text": "dying", "category": CATEGORY_MENTAL_HEALTH}],
+            "I am dying everyday bit by bit",
+        )
+        domains = {c.domain for c in items}
+        self.assertEqual(domains, {DOMAIN_CLINICAL})
+        texts = " ".join(c.text.lower() for c in items)
+        self.assertIn("helpline", texts)
+        self.assertIn("112", texts)
+
+    def test_bank_empty_without_victim_text(self):
+        from ktc.counseling_bank import counseling_candidates
+
+        self.assertEqual(counseling_candidates([], ""), [])
+
+    def test_generic_help_does_not_fire_on_bare_greeting(self):
+        from ktc.counseling_bank import counseling_candidates
+
+        items = counseling_candidates([], "Hi.")
+        self.assertEqual(items, [])
+
+    def test_general_support_urgent_help_fires_bank_fact(self):
+        from ktc.counseling_bank import counseling_candidates
+
+        items = counseling_candidates([], "Hi..I need some urgent help.")
+        self.assertTrue(items)
+        joined = " ".join(c.text.lower() for c in items)
+        self.assertTrue("181" in joined or "1800-599-0019" in joined or "kiran" in joined)
+
+    def test_general_support_helpline_phrasing_fires_bank_fact(self):
+        from ktc.counseling_bank import counseling_candidates
+
+        items = counseling_candidates(
+            [{"text": "helpline", "category": CATEGORY_LEGAL}],
+            "I want to take women helpline support",
+        )
+        self.assertTrue(items)
+        joined = " ".join(c.text.lower() for c in items)
+        self.assertTrue("181" in joined or "1800-599-0019" in joined or "kiran" in joined)
+
+    def test_insane_turn_prefers_helplines_not_fir(self):
+        from ktc.counseling_bank import counseling_candidates
+
+        items = counseling_candidates(
+            [{"text": "insane", "category": CATEGORY_MENTAL_HEALTH}],
+            "I am going insane. I don't understand where to go and whom to ask for help.",
+        )
+        joined = " ".join(c.text.lower() for c in items)
+        self.assertIn("kiran", joined)
+        self.assertIn("icall", joined)
+        self.assertNotIn("crpc section 154", joined)
+        self.assertNotIn("policy makers", joined)
+
+    def test_kicked_out_adds_residence_knowledge(self):
+        from ktc.counseling_bank import counseling_candidates
+
+        items = counseling_candidates(
+            [],
+            "my husband has kicked me out of the house along with kids",
+        )
+        joined = " ".join(c.text.lower() for c in items)
+        self.assertIn("residence", joined)
+        self.assertNotIn("kiran", joined)
+
+
+class TestReplyKnowledge(unittest.TestCase):
+    def test_drops_comment_thread_anecdotes_and_policy_text(self):
+        from ktc.knowledge_item import KnowledgeCandidate
+        from ktc.reply_knowledge import assemble_reply_knowledge
+
+        ranked = assemble_reply_knowledge(
+            [
+                KnowledgeCandidate(
+                    text="My husband has kicked me.",
+                    source="static_dataset",
+                ),
+                KnowledgeCandidate(
+                    text="Policy makers should be encouraged to promote availability of treatment.",
+                    source="live_api",
+                    url="https://www.who.int/india/health-topics/mental-health",
+                ),
+                KnowledgeCandidate(
+                    text="KIRAN, the national mental health helpline 1800-599-0019, offers 24x7 distress support in India.",
+                    source="counseling_bank",
+                    domain="clinical",
+                ),
+                KnowledgeCandidate(
+                    text="You do not have to file a police case before getting emotional support; 181 or NALSA legal aid can help if you later need legal information or protection.",
+                    source="counseling_bank",
+                    domain="legal",
+                ),
+            ]
+        )
+        texts = [c.text.lower() for c in ranked]
+        self.assertTrue(any("kiran" in t for t in texts))
+        self.assertTrue(any("nalsa" in t for t in texts))
+        self.assertFalse(any("kicked me" in t for t in texts))
+        self.assertFalse(any("policy makers" in t for t in texts))
+
 
 class TestNltkSetup(unittest.TestCase):
     def test_resource_table_covers_filter_tagger(self):
@@ -786,7 +1797,75 @@ class TestNltkSetup(unittest.TestCase):
         self.assertIn("scripts/setup_nltk.py", setup_command())
 
 
+class TestFinalKnowledgeText(unittest.TestCase):
+    def test_empty_verbalized_uses_supplemental_facts(self):
+        from ktc.pipeline import assemble_final_knowledge_text
+
+        facts = [
+            KnowledgeCandidate(
+                text="Clinical fact one about KIRAN 1800-599-0019.",
+                source="counseling_bank",
+                domain="clinical",
+            ),
+            KnowledgeCandidate(
+                text="Legal fact two about filing an FIR.",
+                source="counseling_bank",
+                domain="legal",
+            ),
+            KnowledgeCandidate(
+                text="Clinical fact three about iCall 9152987821.",
+                source="counseling_bank",
+                domain="clinical",
+            ),
+        ]
+        text, sources = assemble_final_knowledge_text([], facts)
+        self.assertIn("KIRAN 1800-599-0019", text)
+        self.assertIn("FIR", text)
+        self.assertIn("9152987821", text)
+        self.assertEqual(sources, ["supplemental_counseling"])
+
+    def test_non_overlapping_supplemental_is_appended(self):
+        from ktc.pipeline import assemble_final_knowledge_text
+
+        verbalized = ["Community centres run evening support groups."]
+        facts = [
+            KnowledgeCandidate(
+                text="KIRAN, the national mental health helpline 1800-599-0019, offers 24x7 distress support in India.",
+                source="counseling_bank",
+                domain="clinical",
+            ),
+        ]
+        text, sources = assemble_final_knowledge_text(verbalized, facts)
+        self.assertIn("Community centres", text)
+        self.assertIn("1800-599-0019", text)
+        self.assertEqual(sources, ["verbalized", "supplemental_counseling"])
+
+    def test_both_empty_yields_empty_string(self):
+        from ktc.pipeline import assemble_final_knowledge_text
+
+        text, sources = assemble_final_knowledge_text([], [])
+        self.assertEqual(text, "")
+        self.assertEqual(sources, [])
+
+
 class TestPipelineIntegration(unittest.TestCase):
+    def _passthrough_ranker(self):
+        from ktc.ranking import CandidateRankingResult
+
+        class _Ranker:
+            model = None
+
+            def rank_candidates_with_scores(self, dialog_history, candidates, top_k=26):
+                cl = list(candidates)
+                scores = [0.9] * len(cl)
+                sliced = cl[:top_k]
+                scored = scores[:top_k]
+                return CandidateRankingResult(
+                    sliced, scored, scored[0] if scored else 0.0
+                )
+
+        return _Ranker()
+
     def test_config_defaults_live_retrieval_off(self):
         config = LiveRetrievalConfig.load()
         self.assertFalse(config.enable_live_retrieval)
@@ -800,6 +1879,8 @@ class TestPipelineIntegration(unittest.TestCase):
             pipeline = KnowledgeTripletPipeline(
                 verbalization_backend="template",
                 coref_backend="heuristic",
+                ranker=self._passthrough_ranker(),
+                min_cosine=0.0,
             )
             sentences = pipeline.run(knowledge, history, enable_live=False)
         fetch.assert_not_called()
@@ -814,6 +1895,8 @@ class TestPipelineIntegration(unittest.TestCase):
             pipeline = KnowledgeTripletPipeline(
                 verbalization_backend="template",
                 coref_backend="heuristic",
+                ranker=self._passthrough_ranker(),
+                min_cosine=0.0,
             )
             pipeline.run(
                 "Victims can file a complaint online.",
@@ -825,11 +1908,13 @@ class TestPipelineIntegration(unittest.TestCase):
         from ktc.pipeline import KnowledgeTripletPipeline
 
         with mock.patch(
-            "ktc.pipeline.fetch_live_knowledge", return_value=([], [], [])
+            "ktc.pipeline.fetch_live_knowledge", return_value=([], [], [], None)
         ) as fetch:
             pipeline = KnowledgeTripletPipeline(
                 verbalization_backend="template",
                 coref_backend="heuristic",
+                ranker=self._passthrough_ranker(),
+                min_cosine=0.0,
             )
             pipeline.run(
                 "Victims can file a complaint.",
@@ -839,6 +1924,455 @@ class TestPipelineIntegration(unittest.TestCase):
         fetch.assert_called_once()
         victim_arg = fetch.call_args[0][0]
         self.assertIn("raped", victim_arg.lower())
+        self.assertTrue(fetch.call_args.kwargs.get("enabled", True))
+
+    def test_greeting_without_victim_yields_no_static_knowledge(self):
+        from ktc.pipeline import KnowledgeTripletPipeline
+
+        pipeline = KnowledgeTripletPipeline(
+            verbalization_backend="template",
+            coref_backend="heuristic",
+            ranker=self._passthrough_ranker(),
+        )
+        result = pipeline.run_hybrid(
+            "Do yoga daily for stress relief. Kinjal Singh was arrested in a romance scam.",
+            "agent: Greetings, this is Rakshak to help you.",
+            enable_live=False,
+        )
+        self.assertEqual(result.verbalized, [])
+        self.assertTrue(result.no_passages_used)
+        self.assertEqual(result.final_knowledge_text, "")
+        self.assertEqual(result.final_knowledge_sources, [])
+
+    def test_knowledge_funnel_log_line(self):
+        from ktc.pipeline import KnowledgeTripletPipeline
+
+        pipeline = KnowledgeTripletPipeline(
+            verbalization_backend="template",
+            coref_backend="heuristic",
+            ranker=self._passthrough_ranker(),
+            min_cosine=0.0,
+        )
+        with self.assertLogs("ktc.pipeline", level="INFO") as cm:
+            result = pipeline.run_hybrid(
+                "Victims can file a complaint at the police station.",
+                "agent: Hi. victim: I need help filing a complaint.",
+                enable_live=False,
+            )
+        funnel_lines = [line for line in cm.output if "knowledge_funnel" in line]
+        self.assertTrue(funnel_lines)
+        self.assertIn("static_triplets=", funnel_lines[0])
+        self.assertIn(f"final_verbalized_count={len(result.verbalized)}", funnel_lines[0])
+        self.assertIn("live_sentences=0", funnel_lines[0])
+        self.assertIn("live_sentences_used_directly=0", funnel_lines[0])
+
+    def test_off_topic_blob_yields_no_static_when_gate_fails(self):
+        from ktc.ranking import CandidateRankingResult
+        from ktc.pipeline import KnowledgeTripletPipeline
+
+        class _LowRanker:
+            model = None
+
+            def rank_candidates_with_scores(self, dialog_history, candidates, top_k=26):
+                cl = list(candidates)
+                scores = [0.21] * len(cl)
+                return CandidateRankingResult(cl[:top_k], scores[:top_k], 0.21)
+
+        pipeline = KnowledgeTripletPipeline(
+            verbalization_backend="template",
+            coref_backend="heuristic",
+            ranker=_LowRanker(),
+            min_cosine=0.38,
+        )
+        result = pipeline.run_hybrid(
+            "Romance scams often involve fake dating profiles and requests for money.",
+            "user: my husband said he will murder me tonight.",
+            enable_live=False,
+        )
+        joined = " ".join(result.verbalized).lower()
+        self.assertNotIn("romance scam", joined)
+        self.assertNotIn("kinjal", joined)
+        extra = " ".join(c.text.lower() for c in result.supplemental_counseling)
+        self.assertRegex(extra, r"112|police|murder|intimidation")
+        self.assertFalse(any(c.source == "counseling_bank" for c in result.ranked_candidates))
+        self.assertTrue(result.final_knowledge_text)
+        self.assertIn("supplemental_counseling", result.final_knowledge_sources)
+        self.assertRegex(result.final_knowledge_text.lower(), r"112|police|murder|intimidation")
+
+    def test_dying_turn_covers_legal_and_clinical(self):
+        from ktc.ranking import CandidateRankingResult
+        from ktc.pipeline import KnowledgeTripletPipeline
+
+        class _LowRanker:
+            model = None
+
+            def rank_candidates_with_scores(self, dialog_history, candidates, top_k=26):
+                cl = list(candidates)
+                scores = [0.21] * len(cl)
+                return CandidateRankingResult(cl[:top_k], scores[:top_k], 0.21)
+
+        pipeline = KnowledgeTripletPipeline(
+            verbalization_backend="template",
+            coref_backend="heuristic",
+            ranker=_LowRanker(),
+        )
+        result = pipeline.run_hybrid(
+            "Once you deal with stress yoga will help you succeed in every step.",
+            "bot: Hello. user: I am dying everyday bit by bit .",
+            enable_live=False,
+        )
+        joined = " ".join(result.verbalized).lower()
+        extra = " ".join(c.text.lower() for c in result.supplemental_counseling)
+        self.assertNotIn("yoga", joined)
+        self.assertNotIn("policy makers", joined)
+        self.assertIn("kiran", extra)
+        self.assertIn("112", extra)
+
+    def test_insane_dialogue_brief_is_reply_ready(self):
+        from ktc.ranking import CandidateRankingResult
+        from ktc.pipeline import KnowledgeTripletPipeline
+
+        class _LowRanker:
+            model = None
+
+            def rank_candidates_with_scores(self, dialog_history, candidates, top_k=26):
+                cl = list(candidates)
+                scores = [0.21] * len(cl)
+                return CandidateRankingResult(cl[:top_k], scores[:top_k], 0.21)
+
+        pipeline = KnowledgeTripletPipeline(
+            verbalization_backend="template",
+            coref_backend="heuristic",
+            ranker=_LowRanker(),
+        )
+        blob = (
+            "We have received your complaint request and will get back to you soon "
+            "to resolve your issue by filing a Consumer Complaint against Mental Harassment. "
+            "Team Online Legal India will be in touch. my husband has kicked me. "
+            "Policy makers should be encouraged to promote availability of treatment."
+        )
+        result = pipeline.inspect(
+            blob,
+            "bot: Hello. user: I am going insane . I don't understand where to go and whom to ask for help .",
+            enable_live=False,
+        )
+        joined = " ".join(result["verbalized"]).lower()
+        extra = " ".join(c["text"].lower() for c in result.get("supplemental_counseling") or [])
+        self.assertNotIn("online legal india", joined)
+        self.assertNotIn("policy makers", joined)
+        self.assertNotIn("kicked me", joined)
+        self.assertIn("kiran", extra)
+        self.assertTrue(result["constructed_queries"])
+        qtext = " ".join(q["query"].lower() for q in result["constructed_queries"])
+        self.assertIn("kiran", qtext)
+        self.assertRegex(qtext, r"whom to contact|where to get mental health help")
+        self.assertNotIn("online abuse", qtext)
+        self.assertFalse(any(c.get("source") == "counseling_bank" for c in result["ranked_candidates"]))
+        extra_texts = [c["text"] for c in result.get("supplemental_counseling") or []]
+        self.assertNotEqual(result["verbalized"], extra_texts)
+
+    def test_generic_help_and_insane_do_not_share_canned_verbalized(self):
+        from ktc.ranking import CandidateRankingResult
+        from ktc.pipeline import KnowledgeTripletPipeline
+
+        class _LowRanker:
+            model = None
+
+            def rank_candidates_with_scores(self, dialog_history, candidates, top_k=26):
+                cl = list(candidates)
+                scores = [0.21] * len(cl)
+                return CandidateRankingResult(cl[:top_k], scores[:top_k], 0.21)
+
+        pipeline = KnowledgeTripletPipeline(
+            verbalization_backend="template",
+            coref_backend="heuristic",
+            ranker=_LowRanker(),
+        )
+        blob = "Romance scams often involve fake dating profiles and requests for money."
+        insane = pipeline.inspect(
+            blob,
+            "bot: Hello. user: I am going insane . I don't understand where to go and whom to ask for help .",
+            enable_live=False,
+        )
+        generic = pipeline.inspect(
+            blob,
+            "bot: Hello. user: Hi..I need some urgent help.",
+            enable_live=False,
+        )
+        self.assertTrue(insane.get("constructed_queries"))
+        self.assertEqual(generic.get("constructed_queries"), [])
+        self.assertTrue(insane.get("supplemental_counseling"))
+        self.assertTrue(generic.get("supplemental_counseling"))
+        extra = [c["text"] for c in insane["supplemental_counseling"]]
+        generic_extra = [c["text"] for c in generic["supplemental_counseling"]]
+        self.assertNotEqual(insane["verbalized"], extra)
+        self.assertNotEqual(generic["verbalized"], generic_extra)
+
+    def test_torture_turn_is_not_generic_kiran_only(self):
+        from ktc.ranking import CandidateRankingResult
+        from ktc.pipeline import KnowledgeTripletPipeline
+
+        class _LowRanker:
+            model = None
+
+            def rank_candidates_with_scores(self, dialog_history, candidates, top_k=26):
+                cl = list(candidates)
+                scores = [0.21] * len(cl)
+                return CandidateRankingResult(cl[:top_k], scores[:top_k], 0.21)
+
+        pipeline = KnowledgeTripletPipeline(
+            verbalization_backend="template",
+            coref_backend="heuristic",
+            ranker=_LowRanker(),
+        )
+        result = pipeline.inspect(
+            "Yoga reduces stress.",
+            "bot: Hi. user: i am so frustrated . i am being tortured .",
+            enable_live=False,
+        )
+        extra = " ".join(c["text"].lower() for c in result.get("supplemental_counseling") or [])
+        self.assertIn("torture", " ".join(result.get("situations") or []))
+        self.assertRegex(extra, r"498a|domestic violence|abuse|fir")
+        qtext = " ".join(q["query"].lower() for q in result["constructed_queries"])
+        self.assertRegex(qtext, r"498a|torture|domestic violence")
+
+    def test_full_kare_dialogues_100_500_3000(self):
+        if not DATA_PATH.exists():
+            self.skipTest("KARE.jsonl not available")
+        from ktc.pipeline import KnowledgeTripletPipeline
+
+        pipeline = KnowledgeTripletPipeline(
+            verbalization_backend="template",
+            coref_backend="heuristic",
+            ranker=self._passthrough_ranker(),
+        )
+        specs = {"100": 0, "500": 0, "3000": 1}
+        found = {}
+        with DATA_PATH.open(encoding="utf-8") as f:
+            for line in f:
+                record = json.loads(line)
+                did = str(record["dialogue_id"])
+                if did in specs and did not in found:
+                    found[did] = record
+                if len(found) == len(specs):
+                    break
+        self.assertEqual(set(found), set(specs))
+        for did, record in found.items():
+            with self.subTest(dialogue_id=did):
+                utterances = sorted(record["utterances"], key=lambda u: int(u["utterance_no"]))
+                history = []
+                target = None
+                bot_turn = 0
+                for utterance in utterances:
+                    role = utterance["author_role"]
+                    text = f"{role}: {utterance['utterance'].strip()}"
+                    if role in {"bot", "agent"} and history:
+                        if bot_turn == specs[did]:
+                            target = " ".join(history)
+                            break
+                        bot_turn += 1
+                    history.append(text)
+                self.assertIsNotNone(target)
+                result = pipeline.inspect(record["knowledge"], target, enable_live=False)
+                joined = " ".join(result["verbalized"]).lower()
+                extra = " ".join(c["text"].lower() for c in result.get("supplemental_counseling") or [])
+                self.assertNotIn("kinjal", joined + extra, msg=did)
+                self.assertNotIn("romance scam", joined)
+                self.assertNotIn("policy makers", joined)
+                self.assertNotIn("online legal india", joined)
+                self.assertTrue(
+                    result["verbalized"] or result.get("supplemental_counseling"),
+                    msg=did,
+                )
+
+    def test_sample_dialogues_100_and_500_do_not_crash(self):
+        if not SAMPLE_PATH.exists():
+            self.skipTest("dataset/KARE-Sample.json not available")
+        from ktc.pipeline import KnowledgeTripletPipeline
+
+        pipeline = KnowledgeTripletPipeline(
+            verbalization_backend="template",
+            coref_backend="heuristic",
+            ranker=self._passthrough_ranker(),
+            min_cosine=0.38,
+        )
+        wanted = {"100": 0, "500": 0}
+        found = {}
+        with SAMPLE_PATH.open(encoding="utf-8") as f:
+            for line in f:
+                record = json.loads(line)
+                did = str(record["dialogue_id"])
+                if did in wanted and did not in found:
+                    found[did] = record
+                if len(found) == len(wanted):
+                    break
+        self.assertEqual(set(found), set(wanted))
+        for did, record in found.items():
+            with self.subTest(dialogue_id=did):
+                utterances = sorted(record["utterances"], key=lambda u: int(u["utterance_no"]))
+                history = []
+                target = None
+                bot_turn = 0
+                for utterance in utterances:
+                    role = utterance["author_role"]
+                    text = f"{role}: {utterance['utterance'].strip()}"
+                    if role in {"bot", "agent"} and history:
+                        if bot_turn == wanted[did]:
+                            target = " ".join(history)
+                            break
+                        bot_turn += 1
+                    history.append(text)
+                self.assertIsNotNone(target)
+                result = pipeline.inspect(record["knowledge"], target, enable_live=False)
+                self.assertIn("verbalized", result)
+                self.assertIn("no_passages_used", result)
+                joined = " ".join(result["verbalized"]).lower()
+                self.assertNotIn("kinjal singh", joined)
+
+
+DIALOGUE_111_VICTIM_SPAN = (
+    "Why the hell is my identity required , can't you help me without this ? "
+    "There is a shelter home in Jehanabad where teen girls are residing . "
+    "The owner of this shelter home is such as rascal , he used to give shelter "
+    "to poor and helpless girls and sexually assault them . That monster has a gang "
+    "which make dirty videos of these girls and do business ."
+)
+DIALOGUE_1000_VICTIM_SPAN = (
+    "Someone sent me obscene content on the social media portal's messenger and "
+    "insisted on having a sexual relationship with him . What do you mean by elaborating ? "
+    "I am not narrating a story , I am seriously in trouble , don't you understand.\\."
+)
+
+
+class _MappedCosineRanker:
+    def __init__(self, scores_by_text):
+        self.scores_by_text = scores_by_text
+
+    def cosine_to_query(self, query, texts):
+        return [float(self.scores_by_text.get(text, 0.0)) for text in texts]
+
+
+class TestSituationSemanticFallback(unittest.TestCase):
+    def test_dialogue_111_semantic_child_exploitation(self):
+        from ktc.query_builder import dialogue_situations, dialogue_situations_semantic
+        from ktc.ranking import SentenceBertRanker
+
+        self.assertEqual(dialogue_situations(DIALOGUE_111_VICTIM_SPAN), [])
+        ranker = SentenceBertRanker()
+        names = dialogue_situations_semantic(DIALOGUE_111_VICTIM_SPAN, ranker)
+        self.assertIn("child_exploitation", names)
+        self.assertEqual(names[0], "child_exploitation")
+
+    def test_dialogue_1000_semantic_online_harassment(self):
+        from ktc.query_builder import dialogue_situations, dialogue_situations_semantic
+        from ktc.ranking import SentenceBertRanker
+
+        self.assertEqual(dialogue_situations(DIALOGUE_1000_VICTIM_SPAN), [])
+        ranker = SentenceBertRanker()
+        names = dialogue_situations_semantic(DIALOGUE_1000_VICTIM_SPAN, ranker)
+        self.assertIn("online_harassment", names)
+        self.assertEqual(names[0], "online_harassment")
+
+    def test_regex_rape_not_overridden_by_semantic(self):
+        from ktc.query_builder import SITUATION_EXEMPLARS, dialogue_situations_semantic
+
+        rape_text = "i was raped by few monsters last night i need help from you"
+        hijack = {SITUATION_EXEMPLARS[name]: 0.99 for name in SITUATION_EXEMPLARS}
+        ranker = _MappedCosineRanker(hijack)
+        self.assertEqual(
+            dialogue_situations_semantic(rape_text, ranker),
+            ["rape"],
+        )
+
+    def test_regex_homicide_threat_not_overridden_by_semantic(self):
+        from ktc.query_builder import SITUATION_EXEMPLARS, dialogue_situations_semantic
+
+        text = "Hi Rakshak, my husband is planning to kill me with her secret"
+        hijack = {SITUATION_EXEMPLARS[name]: 0.99 for name in SITUATION_EXEMPLARS}
+        ranker = _MappedCosineRanker(hijack)
+        names = dialogue_situations_semantic(text, ranker)
+        self.assertIn("homicide_threat", names)
+        self.assertNotIn("child_exploitation", names)
+
+    def test_child_exploitation_bank_facts(self):
+        from ktc.counseling_bank import counseling_candidates
+
+        items = counseling_candidates(
+            [],
+            DIALOGUE_111_VICTIM_SPAN,
+            situations=["child_exploitation"],
+        )
+        joined = " ".join(c.text.lower() for c in items)
+        self.assertIn("pocso", joined)
+        self.assertIn("1098", joined)
+
+    def test_online_harassment_bank_facts(self):
+        from ktc.counseling_bank import counseling_candidates
+
+        items = counseling_candidates(
+            [],
+            DIALOGUE_1000_VICTIM_SPAN,
+            situations=["online_harassment"],
+        )
+        joined = " ".join(c.text.lower() for c in items)
+        self.assertRegex(joined, r"67a|section 67")
+        self.assertIn("cybercrime.gov.in", joined)
+
+
+class TestFinalKnowledgeEchoDetection(unittest.TestCase):
+    def test_echo_warning_on_near_identical_concatenation(self):
+        from ktc.pipeline import detect_final_knowledge_echo
+
+        victim = "Someone sent me obscene content on messenger and coerced me."
+        ranker = _MappedCosineRanker({victim: 0.91})
+        with self.assertLogs("ktc.pipeline", level="WARNING") as logs:
+            score = detect_final_knowledge_echo(
+                victim,
+                victim,
+                ["concatenation_fallback"],
+                ranker,
+                dialogue_id="1000",
+                turn=3,
+            )
+        self.assertAlmostEqual(score, 0.91)
+        self.assertTrue(any("final_knowledge_echo_suspected" in line for line in logs.output))
+        self.assertTrue(any("dialogue_id=1000" in line for line in logs.output))
+
+    def test_echo_does_not_fire_on_external_legal_content(self):
+        from ktc.pipeline import detect_final_knowledge_echo
+
+        victim = "Someone sent me obscene content on messenger and coerced me."
+        knowledge = (
+            "Publishing obscene material can be an offence under IT Act Section 67A. "
+            "Report at cybercrime.gov.in or call Childline 1098."
+        )
+        ranker = _MappedCosineRanker({knowledge: 0.42})
+        with self.assertLogs("ktc.pipeline", level="WARNING") as logs:
+            logger = __import__("logging").getLogger("ktc.pipeline")
+            logger.warning("sentinel_no_echo")
+            score = detect_final_knowledge_echo(
+                knowledge,
+                victim,
+                ["concatenation_fallback"],
+                ranker,
+                dialogue_id="111",
+                turn=2,
+            )
+        self.assertIsNone(score)
+        self.assertFalse(any("final_knowledge_echo_suspected" in line for line in logs.output))
+
+    def test_echo_skips_verbalized_when_supplemental_present(self):
+        from ktc.pipeline import detect_final_knowledge_echo
+
+        victim = "I was assaulted at a shelter home."
+        ranker = _MappedCosineRanker({victim: 0.99})
+        score = detect_final_knowledge_echo(
+            victim,
+            victim,
+            ["verbalized", "supplemental_counseling"],
+            ranker,
+        )
+        self.assertIsNone(score)
 
 
 if __name__ == "__main__":
