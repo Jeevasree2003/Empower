@@ -2375,5 +2375,219 @@ class TestFinalKnowledgeEchoDetection(unittest.TestCase):
         self.assertIsNone(score)
 
 
+class TestSemanticEntityFallback(unittest.TestCase):
+    def test_extract_entities_111_has_no_trafficking_label(self):
+        from ktc.entity_extraction import extract_entities
+
+        entities = extract_entities(DIALOGUE_111_VICTIM_SPAN)
+        joined = " ".join(item["text"].lower() for item in entities)
+        self.assertNotIn("trafficking", joined)
+        self.assertNotIn("exploitation", joined)
+
+    def test_resolve_entities_111_semantic_crime_clause(self):
+        from ktc.entity_extraction import (
+            CATEGORY_CRIME,
+            extract_entities_semantic,
+            resolve_entities,
+        )
+        from ktc.ranking import SentenceBertRanker
+
+        ranker = SentenceBertRanker()
+        semantic = extract_entities_semantic(DIALOGUE_111_VICTIM_SPAN, ranker)
+        crime = [item for item in semantic if item["category"] == CATEGORY_CRIME]
+        self.assertTrue(crime, msg=semantic)
+        crime_text = " ".join(item["text"].lower() for item in crime)
+        self.assertNotIn("trafficking", crime_text)
+        self.assertTrue(
+            "dirty" in crime_text or "video" in crime_text or "girls" in crime_text,
+            msg=crime_text,
+        )
+        clause = (
+            "That monster has a gang which make dirty videos of these girls and do business"
+        )
+        resolved = resolve_entities(clause, ranker=ranker)
+        self.assertTrue(any(item["category"] == CATEGORY_CRIME for item in resolved), msg=resolved)
+        self.assertTrue(all("trafficking" not in item["text"].lower() for item in resolved))
+
+    def test_extract_entities_1000_has_no_obscene_crime_lexicon(self):
+        from ktc.entity_extraction import CATEGORY_CRIME, extract_entities
+
+        entities = extract_entities(DIALOGUE_1000_VICTIM_SPAN)
+        crime_text = " ".join(
+            item["text"].lower() for item in entities if item["category"] == CATEGORY_CRIME
+        )
+        self.assertNotIn("obscene", crime_text)
+        self.assertNotIn("trafficking", crime_text)
+
+    def test_resolve_entities_1000_semantic_crime_or_medium(self):
+        from ktc.entity_extraction import (
+            CATEGORY_CRIME,
+            CATEGORY_MEDIUM,
+            extract_entities_semantic,
+            resolve_entities,
+        )
+        from ktc.ranking import SentenceBertRanker
+
+        ranker = SentenceBertRanker()
+        semantic = extract_entities_semantic(DIALOGUE_1000_VICTIM_SPAN, ranker)
+        tagged = [
+            item
+            for item in semantic
+            if item["category"] in {CATEGORY_CRIME, CATEGORY_MEDIUM}
+        ]
+        self.assertTrue(tagged, msg=semantic)
+        joined = " ".join(item["text"].lower() for item in tagged)
+        self.assertTrue("obscene" in joined or "sexual" in joined or "messenger" in joined)
+        clause = (
+            "Someone sent me unsolicited obscene content and insisted on a sexual relationship"
+        )
+        resolved = resolve_entities(clause, ranker=ranker)
+        self.assertTrue(
+            any(item["category"] in {CATEGORY_CRIME, CATEGORY_MEDIUM} for item in resolved),
+            msg=resolved,
+        )
+
+    def test_resolve_entities_lexicon_short_circuits_semantic(self):
+        from ktc.entity_extraction import extract_entities, resolve_entities
+
+        utterance = "I was assaulted at the workplace yesterday"
+        lexicon = extract_entities(utterance)
+        self.assertTrue(lexicon)
+        with mock.patch(
+            "ktc.entity_extraction.extract_entities_semantic",
+            side_effect=AssertionError("semantic path should not run"),
+        ):
+            resolved = resolve_entities(utterance, ranker=object())
+        self.assertEqual(resolved, lexicon)
+
+
+class TestCaseMemoryAndSituationGaps(unittest.TestCase):
+    def tearDown(self):
+        from ktc.pipeline import clear_case_memories
+
+        clear_case_memories()
+
+    def test_update_situations_returns_only_new_names(self):
+        from ktc.case_memory import CaseMemory
+
+        memory = CaseMemory(dialogue_id="dv-1")
+        first = memory.update_situations(["domestic_violence", "help_seeking"])
+        self.assertEqual(first, ["domestic_violence", "help_seeking"])
+        second = memory.update_situations(["domestic_violence", "cyberstalking"])
+        self.assertEqual(second, ["cyberstalking"])
+        self.assertEqual(
+            memory.situations_seen,
+            ["domestic_violence", "help_seeking", "cyberstalking"],
+        )
+
+    def test_situation_gaps_any_keyword_covers_situation(self):
+        from ktc.query_builder import situation_gaps
+
+        gaps = situation_gaps(
+            ["domestic_violence"],
+            ["Women in distress can call helpline 181 for support."],
+        )
+        self.assertEqual(gaps, [])
+        still_open = situation_gaps(
+            ["domestic_violence"],
+            ["A counselor can listen without requiring a diagnosis."],
+        )
+        self.assertEqual(still_open, ["domestic_violence"])
+
+    def test_empty_dialogue_id_does_not_touch_case_memory(self):
+        from ktc.pipeline import (
+            KnowledgeTripletPipeline,
+            _CASE_MEMORIES,
+            clear_case_memories,
+        )
+
+        clear_case_memories()
+        pipeline = KnowledgeTripletPipeline(
+            verbalization_backend="template",
+            coref_backend="heuristic",
+            ranker=TestPipelineIntegration()._passthrough_ranker(),
+        )
+        history = "agent: Hello. victim: my husband beats me every night."
+        first = pipeline.run_hybrid(
+            "Police can record an FIR under CrPC 154.",
+            history,
+            enable_live=False,
+            dialogue_id="",
+        )
+        self.assertEqual(_CASE_MEMORIES, {})
+        second = pipeline.run_hybrid(
+            "Police can record an FIR under CrPC 154.",
+            history,
+            enable_live=False,
+            dialogue_id="",
+        )
+        self.assertEqual(_CASE_MEMORIES, {})
+        self.assertEqual(first.verbalized, second.verbalized)
+        self.assertEqual(first.situations, second.situations)
+        self.assertEqual(
+            [query.text for query in first.constructed_queries],
+            [query.text for query in second.constructed_queries],
+        )
+        self.assertEqual(first.entities, second.entities)
+
+    def test_second_turn_does_not_repeat_issued_queries_and_adds_whatsapp(self):
+        from ktc.knowledge_item import KnowledgeCandidate
+        from ktc.live_config import LiveRetrievalConfig
+        from ktc.live_knowledge import LiveFunnel
+        from ktc.pipeline import KnowledgeTripletPipeline, clear_case_memories, get_case_memory
+
+        clear_case_memories()
+
+        def fake_fetch(victim_utterance, config, budget, **kwargs):
+            queries = list(kwargs.get("queries") or [])
+            fact = KnowledgeCandidate(
+                text="A woman can seek a PWDVA protection order and call 181.",
+                source="live_api",
+            )
+            return [fact], queries, [], LiveFunnel()
+
+        pipeline = KnowledgeTripletPipeline(
+            verbalization_backend="template",
+            coref_backend="heuristic",
+            ranker=TestPipelineIntegration()._passthrough_ranker(),
+            live_config=LiveRetrievalConfig(
+                enable_live_retrieval=True,
+                max_live_queries_per_dialogue=8,
+                max_api_calls_per_run=20,
+            ),
+        )
+        history1 = "agent: Hello. victim: my husband beats me every night and I am afraid."
+        with mock.patch("ktc.pipeline.fetch_live_knowledge", side_effect=fake_fetch):
+            turn1 = pipeline.run_hybrid(
+                "",
+                history1,
+                enable_live=True,
+                dialogue_id="case-dv-wa",
+                turn=0,
+            )
+        turn1_queries = [query.text for query in turn1.constructed_queries]
+        self.assertTrue(turn1_queries)
+        memory = get_case_memory("case-dv-wa")
+        issued_after_turn1 = set(memory.queries_issued)
+
+        history2 = (
+            "agent: Hello. victim: my husband beats me every night and I am afraid. "
+            "agent: I am here. victim: he also threatened me on WhatsApp."
+        )
+        with mock.patch("ktc.pipeline.fetch_live_knowledge", side_effect=fake_fetch):
+            turn2 = pipeline.run_hybrid(
+                "",
+                history2,
+                enable_live=True,
+                dialogue_id="case-dv-wa",
+                turn=1,
+            )
+        turn2_queries = [query.text for query in turn2.constructed_queries]
+        for text in turn1_queries:
+            self.assertNotIn(text, turn2_queries)
+        self.assertTrue(any("whatsapp" in text.lower() for text in turn2_queries), msg=turn2_queries)
+        self.assertTrue(issued_after_turn1 <= memory.queries_issued)
+
+
 if __name__ == "__main__":
     unittest.main()
