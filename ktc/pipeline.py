@@ -28,7 +28,7 @@ from ktc.live_knowledge import (
     victim_utterances_from_history,
 )
 from ktc.passages import select_dual_domain_passages, split_knowledge_passages
-from ktc.query_builder import SearchQuery, build_queries, dialogue_situations
+from ktc.query_builder import SearchQuery, build_queries, resolve_dialogue_situations
 from ktc.ranking import (
     MAX_RANKED,
     MIN_COSINE,
@@ -131,6 +131,58 @@ def assemble_final_knowledge_text(
     return " ".join(sentences), sources
 
 
+FINAL_KNOWLEDGE_ECHO_THRESHOLD = 0.75
+
+
+def detect_final_knowledge_echo(
+    final_knowledge_text: str,
+    victim_span: str,
+    sources: Sequence[str],
+    ranker,
+    *,
+    threshold: float = FINAL_KNOWLEDGE_ECHO_THRESHOLD,
+    dialogue_id: str = "",
+    turn: object = "",
+) -> Optional[float]:
+    """Log (and return) cosine when KT looks like a near-copy of the victim turn.
+
+    Visibility only — does not change returned knowledge. Fires when similarity is
+    high and the KT source is concatenation_fallback, or verbalized with no
+    supplemental counseling mixed in.
+    """
+    final = (final_knowledge_text or "").strip()
+    victim = (victim_span or "").strip()
+    if not final or not victim or ranker is None:
+        return None
+    source_set = {str(item) for item in (sources or [])}
+    has_supplemental = "supplemental_counseling" in source_set
+    concat = "concatenation_fallback" in source_set
+    verbalized_only = "verbalized" in source_set and not has_supplemental and not concat
+    if not concat and not verbalized_only:
+        return None
+    if hasattr(ranker, "cosine_to_query"):
+        scores = ranker.cosine_to_query(victim, [final])
+        similarity = float(scores[0]) if scores else 0.0
+    else:
+        model = getattr(ranker, "model", None)
+        if model is None:
+            return None
+        from ktc.ranking import encode_texts_cached
+        import numpy as np
+
+        batch = encode_texts_cached(model, [victim, final])
+        similarity = float(np.dot(batch[1], batch[0]))
+    if similarity >= threshold:
+        logger.warning(
+            "final_knowledge_echo_suspected similarity=%.3f dialogue_id=%s turn=%s",
+            similarity,
+            dialogue_id,
+            turn,
+        )
+        return similarity
+    return None
+
+
 @dataclass
 class HybridRunResult:
     verbalized: List[str]
@@ -155,6 +207,9 @@ class HybridRunResult:
     live_elapsed_seconds: Optional[float] = None
     knowledge_funnel: Optional[Dict[str, object]] = None
     live_page_stats: List[Dict] = field(default_factory=list)
+    situation_source: str = ""
+    situation_scores: Dict[str, float] = field(default_factory=dict)
+    echo_similarity: Optional[float] = None
 
 
 @dataclass
@@ -302,18 +357,21 @@ class KnowledgeTripletPipeline:
         filtered: Optional[List[Triplet]] = None,
         enable_live: Optional[bool] = None,
         synthesize: bool = False,
+        dialogue_id: str = "",
+        turn: object = "",
     ) -> HybridRunResult:
         nlp = self._get_nlp()
-        query = ranking_query_from_history(dialog_history, nlp=nlp)
+        ranker = self._get_ranker()
+        query = ranking_query_from_history(dialog_history, nlp=nlp, ranker=ranker)
         victim_span = " ".join(victim_utterances_from_history(dialog_history)[-2:])
         entities = extract_entities(victim_span, nlp=nlp)
-        situations = dialogue_situations(victim_span)
+        situations, situation_meta = resolve_dialogue_situations(victim_span, ranker=ranker)
         passages = split_knowledge_passages(knowledge_text)
-        search_domains = content_need_domains(entities, victim_span)
+        search_domains = content_need_domains(entities, victim_span, situations=situations)
         selected_passages = select_dual_domain_passages(
             passages,
             query,
-            self._get_ranker(),
+            ranker,
             top_n=self.passage_top_n,
             min_cosine=self.min_cosine,
             include_legal=DOMAIN_LEGAL in search_domains,
@@ -341,6 +399,8 @@ class KnowledgeTripletPipeline:
             entities,
             max_queries=self.live_config.max_live_queries_per_dialogue,
             victim_text=victim_span,
+            ranker=ranker,
+            situations=situations,
         )
         pool = static_candidates_from_triplets(filtered)
         live_on = self.live_config.enable_live_retrieval if enable_live is None else enable_live
@@ -355,7 +415,7 @@ class KnowledgeTripletPipeline:
                 self.api_budget,
                 nlp=nlp,
                 enabled=True,
-                ranker=self._get_ranker(),
+                ranker=ranker,
                 min_cosine=self.min_cosine,
             )
             live_elapsed_seconds = time.monotonic() - started
@@ -366,12 +426,12 @@ class KnowledgeTripletPipeline:
             rank_text,
             pool,
             top_k=self.top_k,
-            ranker=self._get_ranker(),
+            ranker=ranker,
             min_cosine=self.min_cosine,
         )
         ranked = [c for c in ranked if is_ktc_usable(c)]
         ranked = _dedup_ranked_candidates(ranked)
-        supplemental = counseling_candidates(entities, victim_span)
+        supplemental = counseling_candidates(entities, victim_span, situations=situations)
         verbalized = _dedup_texts(self._verbalize_candidates(ranked))
         static_verbalized = []
         if filtered:
@@ -453,6 +513,18 @@ class KnowledgeTripletPipeline:
             funnel["gate_passed"],
             funnel["final_verbalized_count"],
         )
+        situation_scores = {
+            str(name): float(score)
+            for name, score in (situation_meta.get("scores") or {}).items()
+        }
+        echo_similarity = detect_final_knowledge_echo(
+            final_knowledge_text,
+            victim_span,
+            final_sources,
+            ranker,
+            dialogue_id=dialogue_id,
+            turn=turn,
+        )
         return HybridRunResult(
             verbalized=verbalized,
             top1_similarity_score=top1_score,
@@ -476,6 +548,9 @@ class KnowledgeTripletPipeline:
             live_elapsed_seconds=live_elapsed_seconds,
             knowledge_funnel=funnel,
             live_page_stats=live_pages,
+            situation_source=str(situation_meta.get("source") or ""),
+            situation_scores=situation_scores,
+            echo_similarity=echo_similarity,
         )
 
     def run_raw_knowledge(self, knowledge_text: str) -> List[str]:
@@ -488,12 +563,16 @@ class KnowledgeTripletPipeline:
         dialog_history: str,
         enable_live: Optional[bool] = None,
         synthesize: bool = False,
+        dialogue_id: str = "",
+        turn: object = "",
     ) -> dict:
         hybrid = self.run_hybrid(
             knowledge_text,
             dialog_history,
             enable_live=enable_live,
             synthesize=synthesize,
+            dialogue_id=dialogue_id,
+            turn=turn,
         )
         used_text = " ".join(hybrid.passages_used)
         module_knowledge = list(hybrid.verbalized)
@@ -512,6 +591,9 @@ class KnowledgeTripletPipeline:
             "victim_span": hybrid.victim_span,
             "entities": hybrid.entities,
             "situations": hybrid.situations,
+            "situation_source": hybrid.situation_source,
+            "situation_scores": hybrid.situation_scores,
+            "echo_similarity": hybrid.echo_similarity,
             "ranking_query": hybrid.ranking_query,
             "constructed_queries": [q.to_dict() for q in hybrid.constructed_queries],
             "static_knowledge": {

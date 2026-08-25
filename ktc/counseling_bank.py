@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Sequence, Set
+from typing import Dict, Iterable, List, Optional, Sequence, Set
 
 from ktc.entity_extraction import (
     CATEGORY_CRIME,
@@ -84,6 +84,34 @@ _CYBER = frozenset(
     }
 )
 _GENERAL_SUPPORT = frozenset({"general_support"})
+_SITUATION_LEGAL = frozenset(
+    {
+        "child_exploitation",
+        "online_harassment",
+        "identity_theft",
+        "online_bullying",
+        "matrimonial_fraud",
+        "intimate_content_sharing",
+        "financial_scam",
+        "acid_attack",
+        "trafficking",
+        "cyberstalking",
+        "exposing_personal_information",
+        "sexual_assault",
+        "homicide_threat",
+        "rape",
+        "gang_rape",
+        "torture",
+        "kicked_out",
+        "workplace_harassment",
+        "loan_recovery",
+        "investment_fraud",
+        "missing_person",
+        "desertion_bigamy",
+        "domestic_violence",
+    }
+)
+_SITUATION_CLINICAL = frozenset({"social_exclusion", "suicide_crisis", "help_seeking"})
 _GENERAL_HELP_PATTERNS = (
     r"\bhelpline\b",
     r"\bsupport\b",
@@ -217,13 +245,91 @@ def _facts() -> List[CounselingFact]:
         CounselingFact(
             DOMAIN_LEGAL,
             "Cybercrime including online harassment can be reported at the National Cyber Crime Reporting Portal cybercrime.gov.in.",
-            _CYBER | frozenset({"complaint"}),
+            _CYBER | frozenset({"complaint", "online_harassment", "cyberstalking", "identity_theft", "financial_scam", "intimate_content_sharing", "online_bullying"}),
             "https://cybercrime.gov.in/",
+        ),
+        CounselingFact(
+            DOMAIN_LEGAL,
+            "Sexual offences against children are covered by the POCSO Act; report immediately to police and the Child Welfare Committee.",
+            frozenset({"child_exploitation", "trafficking"}),
+            "https://wcd.nic.in/",
+            emergency=True,
+        ),
+        CounselingFact(
+            DOMAIN_LEGAL,
+            "Childline 1098 is the 24x7 emergency helpline for children in distress in India and can connect you to local protection services.",
+            frozenset({"child_exploitation", "trafficking"}),
+            "https://www.childlineindia.org/",
+        ),
+        CounselingFact(
+            DOMAIN_LEGAL,
+            "Publishing or transmitting obscene or sexually explicit material electronically can be an offence under IT Act Sections 67 and 67A; preserve screenshots and report at cybercrime.gov.in.",
+            frozenset({"online_harassment", "intimate_content_sharing"}),
+            "https://cybercrime.gov.in/",
+        ),
+        CounselingFact(
+            DOMAIN_LEGAL,
+            "Identity theft and impersonation using your name or documents can be reported to local police and the National Cyber Crime Reporting Portal.",
+            frozenset({"identity_theft"}),
+            "https://cybercrime.gov.in/",
+        ),
+        CounselingFact(
+            DOMAIN_LEGAL,
+            "A fraudulent marriage or matrimonial cheating complaint can be filed with police; keep chats, payments, and the marriage advertisement as evidence.",
+            frozenset({"matrimonial_fraud"}),
+        ),
+        CounselingFact(
+            DOMAIN_LEGAL,
+            "Non-consensual sharing of intimate images or videos can be reported on cybercrime.gov.in and to the local cyber cell; ask platforms to take the content down.",
+            frozenset({"intimate_content_sharing"}),
+            "https://cybercrime.gov.in/",
+        ),
+        CounselingFact(
+            DOMAIN_LEGAL,
+            "Financial and UPI scams can be reported on cybercrime.gov.in and to the bank's fraud helpline so the transaction can be flagged quickly.",
+            frozenset({"financial_scam", "investment_fraud"}),
+            "https://cybercrime.gov.in/",
+        ),
+        CounselingFact(
+            DOMAIN_CLINICAL,
+            "Social exclusion and ostracism can be isolating; KIRAN 1800-599-0019 and iCall can listen and help you plan a next safe step.",
+            frozenset({"social_exclusion"}),
+        ),
+        CounselingFact(
+            DOMAIN_LEGAL,
+            "An acid attack is a grave offence; seek emergency medical care, preserve evidence, and file an FIR without delay.",
+            frozenset({"acid_attack"}),
+            emergency=True,
+        ),
+        CounselingFact(
+            DOMAIN_LEGAL,
+            "Human trafficking of women or children can be reported to police, Childline 1098, and anti-trafficking units; do not confront traffickers alone.",
+            frozenset({"trafficking", "child_exploitation"}),
+            emergency=True,
+        ),
+        CounselingFact(
+            DOMAIN_LEGAL,
+            "Cyberstalking is an offence under IPC Section 354D; block the accounts, save messages, and report at cybercrime.gov.in.",
+            frozenset({"cyberstalking", "online_harassment"}),
+        ),
+        CounselingFact(
+            DOMAIN_LEGAL,
+            "Publishing someone's private phone number, address, or photos online without consent can be reported as a cyber offence and to the platform.",
+            frozenset({"exposing_personal_information"}),
+        ),
+        CounselingFact(
+            DOMAIN_LEGAL,
+            "Sexual assault and molestation can be reported as a cognizable offence; a survivor can file an FIR and seek medical and legal aid.",
+            frozenset({"sexual_assault", "rape"}),
         ),
     ]
 
 
-def _trigger_keys(entities: Sequence[Dict[str, str]], victim_text: str) -> Set[str]:
+def _trigger_keys(
+    entities: Sequence[Dict[str, str]],
+    victim_text: str,
+    situations: Optional[Sequence[str]] = None,
+) -> Set[str]:
     keys = {e.get("text", "").strip().lower() for e in entities if e.get("text")}
     lower = (victim_text or "").lower()
     for token in (
@@ -266,18 +372,26 @@ def _trigger_keys(entities: Sequence[Dict[str, str]], victim_text: str) -> Set[s
         keys.add("rape")
     if any(re.search(pattern, lower) for pattern in _GENERAL_HELP_PATTERNS):
         keys.add("general_support")
+    for name in situations or ():
+        token = (name or "").strip().lower()
+        if token:
+            keys.add(token)
     return {k for k in keys if k}
 
 
-def content_need_domains(entities: Sequence[Dict[str, str]], victim_text: str) -> Set[str]:
+def content_need_domains(
+    entities: Sequence[Dict[str, str]],
+    victim_text: str,
+    situations: Optional[Sequence[str]] = None,
+) -> Set[str]:
     """Domains evidenced in the victim text — used to search the KARE blob."""
     cats = {e.get("category") for e in entities}
-    keys = _trigger_keys(entities, victim_text)
+    keys = _trigger_keys(entities, victim_text, situations=situations)
     domains: Set[str] = set()
-    if cats & {CATEGORY_MENTAL_HEALTH} or keys & _CRISIS:
+    if cats & {CATEGORY_MENTAL_HEALTH} or keys & _CRISIS or keys & _SITUATION_CLINICAL:
         domains.add(DOMAIN_CLINICAL)
     if cats & {CATEGORY_CRIME, CATEGORY_LEGAL} or keys & (
-        _VIOLENCE | _PROCEDURE | _FAMILY_LAW | _MISSING | _CYBER | _WORKPLACE | _DEBT | _GENERAL_SUPPORT
+        _VIOLENCE | _PROCEDURE | _FAMILY_LAW | _MISSING | _CYBER | _WORKPLACE | _DEBT | _GENERAL_SUPPORT | _SITUATION_LEGAL
     ):
         domains.add(DOMAIN_LEGAL)
     if keys & _GENERAL_SUPPORT:
@@ -286,20 +400,25 @@ def content_need_domains(entities: Sequence[Dict[str, str]], victim_text: str) -
     return domains
 
 
-def victim_needs_domains(entities: Sequence[Dict[str, str]], victim_text: str) -> Set[str]:
+def victim_needs_domains(
+    entities: Sequence[Dict[str, str]],
+    victim_text: str,
+    situations: Optional[Sequence[str]] = None,
+) -> Set[str]:
     """Only domains evidenced in the victim text — no blanket clinical/legal fill."""
-    return content_need_domains(entities, victim_text)
+    return content_need_domains(entities, victim_text, situations=situations)
 
 
 def counseling_candidates(
     entities: Sequence[Dict[str, str]],
     victim_text: str,
     per_domain: int = 3,
+    situations: Optional[Sequence[str]] = None,
 ) -> List[KnowledgeCandidate]:
     if not (victim_text or "").strip():
         return []
-    keys = _trigger_keys(entities, victim_text)
-    needed = victim_needs_domains(entities, victim_text)
+    keys = _trigger_keys(entities, victim_text, situations=situations)
+    needed = victim_needs_domains(entities, victim_text, situations=situations)
     selected: List[KnowledgeCandidate] = []
     seen: Set[str] = set()
 

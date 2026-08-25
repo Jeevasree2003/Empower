@@ -91,7 +91,7 @@ def _stable_rank_order(scores: np.ndarray, top_k: int) -> np.ndarray:
     return np.lexsort((indices, -scores))[:top_k]
 
 
-def ranking_query_from_history(dialog_history: str, nlp=None) -> str:
+def ranking_query_from_history(dialog_history: str, nlp=None, ranker=None) -> str:
     """Build the ranking text from the last 1–2 victim/user utterances.
 
     Bot/agent greetings are excluded. The latest victim turn is repeated so it
@@ -112,7 +112,7 @@ def ranking_query_from_history(dialog_history: str, nlp=None) -> str:
     extra = " ".join(entity["text"] for entity in entities)
     from ktc.query_builder import ranking_hints_for_dialogue
 
-    hints = ranking_hints_for_dialogue(" ".join(recent))
+    hints = ranking_hints_for_dialogue(" ".join(recent), ranker=ranker)
     return f"{text} {extra} {hints}".strip()
 
 

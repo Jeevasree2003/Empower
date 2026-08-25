@@ -66,6 +66,21 @@ def print_demo(dialogue: dict, history: str, result: dict, turn: int) -> None:
 
     _print_stage("STAGE 0.5  Entities, situation, constructed queries")
     print(f"situations: {result.get('situations')}")
+    source = result.get("situation_source") or ""
+    scores = result.get("situation_scores") or {}
+    if source == "regex":
+        print("situation_source=regex")
+    elif source == "semantic":
+        if scores:
+            top_name = (result.get("situations") or [""])[0]
+            top_score = scores.get(top_name)
+            if top_score is None and scores:
+                top_name, top_score = max(scores.items(), key=lambda item: item[1])
+            print(f"situation_source=semantic score={top_score} category={top_name}")
+        else:
+            print("situation_source=semantic score= category=")
+    elif source:
+        print(f"situation_source={source}")
     print(f"entities: {result.get('entities')}")
     print("constructed_queries (what Tavily would search with --enable-live):")
     queries = result.get("constructed_queries") or []
@@ -222,6 +237,8 @@ def main() -> None:
         history,
         enable_live=args.enable_live,
         synthesize=args.synthesize,
+        dialogue_id=str(dialogue.get("dialogue_id") or ""),
+        turn=args.turn,
     )
     if args.json:
         print(json.dumps(result, indent=2, ensure_ascii=False))

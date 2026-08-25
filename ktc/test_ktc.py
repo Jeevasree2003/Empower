@@ -2230,5 +2230,150 @@ class TestPipelineIntegration(unittest.TestCase):
                 self.assertNotIn("kinjal singh", joined)
 
 
+DIALOGUE_111_VICTIM_SPAN = (
+    "Why the hell is my identity required , can't you help me without this ? "
+    "There is a shelter home in Jehanabad where teen girls are residing . "
+    "The owner of this shelter home is such as rascal , he used to give shelter "
+    "to poor and helpless girls and sexually assault them . That monster has a gang "
+    "which make dirty videos of these girls and do business ."
+)
+DIALOGUE_1000_VICTIM_SPAN = (
+    "Someone sent me obscene content on the social media portal's messenger and "
+    "insisted on having a sexual relationship with him . What do you mean by elaborating ? "
+    "I am not narrating a story , I am seriously in trouble , don't you understand.\\."
+)
+
+
+class _MappedCosineRanker:
+    def __init__(self, scores_by_text):
+        self.scores_by_text = scores_by_text
+
+    def cosine_to_query(self, query, texts):
+        return [float(self.scores_by_text.get(text, 0.0)) for text in texts]
+
+
+class TestSituationSemanticFallback(unittest.TestCase):
+    def test_dialogue_111_semantic_child_exploitation(self):
+        from ktc.query_builder import dialogue_situations, dialogue_situations_semantic
+        from ktc.ranking import SentenceBertRanker
+
+        self.assertEqual(dialogue_situations(DIALOGUE_111_VICTIM_SPAN), [])
+        ranker = SentenceBertRanker()
+        names = dialogue_situations_semantic(DIALOGUE_111_VICTIM_SPAN, ranker)
+        self.assertIn("child_exploitation", names)
+        self.assertEqual(names[0], "child_exploitation")
+
+    def test_dialogue_1000_semantic_online_harassment(self):
+        from ktc.query_builder import dialogue_situations, dialogue_situations_semantic
+        from ktc.ranking import SentenceBertRanker
+
+        self.assertEqual(dialogue_situations(DIALOGUE_1000_VICTIM_SPAN), [])
+        ranker = SentenceBertRanker()
+        names = dialogue_situations_semantic(DIALOGUE_1000_VICTIM_SPAN, ranker)
+        self.assertIn("online_harassment", names)
+        self.assertEqual(names[0], "online_harassment")
+
+    def test_regex_rape_not_overridden_by_semantic(self):
+        from ktc.query_builder import SITUATION_EXEMPLARS, dialogue_situations_semantic
+
+        rape_text = "i was raped by few monsters last night i need help from you"
+        hijack = {SITUATION_EXEMPLARS[name]: 0.99 for name in SITUATION_EXEMPLARS}
+        ranker = _MappedCosineRanker(hijack)
+        self.assertEqual(
+            dialogue_situations_semantic(rape_text, ranker),
+            ["rape"],
+        )
+
+    def test_regex_homicide_threat_not_overridden_by_semantic(self):
+        from ktc.query_builder import SITUATION_EXEMPLARS, dialogue_situations_semantic
+
+        text = "Hi Rakshak, my husband is planning to kill me with her secret"
+        hijack = {SITUATION_EXEMPLARS[name]: 0.99 for name in SITUATION_EXEMPLARS}
+        ranker = _MappedCosineRanker(hijack)
+        names = dialogue_situations_semantic(text, ranker)
+        self.assertIn("homicide_threat", names)
+        self.assertNotIn("child_exploitation", names)
+
+    def test_child_exploitation_bank_facts(self):
+        from ktc.counseling_bank import counseling_candidates
+
+        items = counseling_candidates(
+            [],
+            DIALOGUE_111_VICTIM_SPAN,
+            situations=["child_exploitation"],
+        )
+        joined = " ".join(c.text.lower() for c in items)
+        self.assertIn("pocso", joined)
+        self.assertIn("1098", joined)
+
+    def test_online_harassment_bank_facts(self):
+        from ktc.counseling_bank import counseling_candidates
+
+        items = counseling_candidates(
+            [],
+            DIALOGUE_1000_VICTIM_SPAN,
+            situations=["online_harassment"],
+        )
+        joined = " ".join(c.text.lower() for c in items)
+        self.assertRegex(joined, r"67a|section 67")
+        self.assertIn("cybercrime.gov.in", joined)
+
+
+class TestFinalKnowledgeEchoDetection(unittest.TestCase):
+    def test_echo_warning_on_near_identical_concatenation(self):
+        from ktc.pipeline import detect_final_knowledge_echo
+
+        victim = "Someone sent me obscene content on messenger and coerced me."
+        ranker = _MappedCosineRanker({victim: 0.91})
+        with self.assertLogs("ktc.pipeline", level="WARNING") as logs:
+            score = detect_final_knowledge_echo(
+                victim,
+                victim,
+                ["concatenation_fallback"],
+                ranker,
+                dialogue_id="1000",
+                turn=3,
+            )
+        self.assertAlmostEqual(score, 0.91)
+        self.assertTrue(any("final_knowledge_echo_suspected" in line for line in logs.output))
+        self.assertTrue(any("dialogue_id=1000" in line for line in logs.output))
+
+    def test_echo_does_not_fire_on_external_legal_content(self):
+        from ktc.pipeline import detect_final_knowledge_echo
+
+        victim = "Someone sent me obscene content on messenger and coerced me."
+        knowledge = (
+            "Publishing obscene material can be an offence under IT Act Section 67A. "
+            "Report at cybercrime.gov.in or call Childline 1098."
+        )
+        ranker = _MappedCosineRanker({knowledge: 0.42})
+        with self.assertLogs("ktc.pipeline", level="WARNING") as logs:
+            logger = __import__("logging").getLogger("ktc.pipeline")
+            logger.warning("sentinel_no_echo")
+            score = detect_final_knowledge_echo(
+                knowledge,
+                victim,
+                ["concatenation_fallback"],
+                ranker,
+                dialogue_id="111",
+                turn=2,
+            )
+        self.assertIsNone(score)
+        self.assertFalse(any("final_knowledge_echo_suspected" in line for line in logs.output))
+
+    def test_echo_skips_verbalized_when_supplemental_present(self):
+        from ktc.pipeline import detect_final_knowledge_echo
+
+        victim = "I was assaulted at a shelter home."
+        ranker = _MappedCosineRanker({victim: 0.99})
+        score = detect_final_knowledge_echo(
+            victim,
+            victim,
+            ["verbalized", "supplemental_counseling"],
+            ranker,
+        )
+        self.assertIsNone(score)
+
+
 if __name__ == "__main__":
     unittest.main()

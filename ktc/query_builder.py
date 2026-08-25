@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from ktc.entity_extraction import (
     CATEGORY_CRIME,
@@ -77,6 +77,19 @@ _TEMPLATE_PRIORITY = {
     "sit_loan_recovery": 0,
     "sit_fraud": 0,
     "sit_missing": 0,
+    "sit_child_exploitation": 0,
+    "sit_online_harassment": 0,
+    "sit_identity_theft": 0,
+    "sit_online_bullying": 0,
+    "sit_matrimonial_fraud": 0,
+    "sit_intimate_content": 0,
+    "sit_financial_scam": 0,
+    "sit_social_exclusion": 0,
+    "sit_acid_attack": 0,
+    "sit_trafficking": 0,
+    "sit_cyberstalking": 0,
+    "sit_exposing_personal_info": 0,
+    "sit_sexual_assault": 0,
     "crime_statute_indiacode": 1,
     "crime_report_india": 2,
     "legal_fir_procedure": 2,
@@ -104,7 +117,106 @@ _SITUATION_RANK_HINTS = {
     "missing_person": "missing person police complaint",
     "desertion_bigamy": "IPC 494 bigamy 498A cruelty",
     "domestic_violence": "domestic violence 498A PWDVA helpline 181",
+    "child_exploitation": "POCSO Act Childline 1098 Child Welfare Committee child sexual abuse trafficking",
+    "online_harassment": "IT Act 67 67A obscene content cybercrime.gov.in online sexual coercion",
+    "identity_theft": "identity theft impersonation Aadhaar bank KYC cybercrime.gov.in",
+    "online_bullying": "cyberbullying online bullying school social media complaint India",
+    "matrimonial_fraud": "fraudulent marriage NRI groom matrimonial scam police complaint",
+    "intimate_content_sharing": "non-consensual intimate images IT Act 67A cybercrime.gov.in",
+    "financial_scam": "financial scam UPI investment fraud cybercrime.gov.in RBI",
+    "social_exclusion": "social exclusion ostracism community boycott support helpline India",
+    "acid_attack": "acid attack FIR medical treatment compensation India",
+    "trafficking": "human trafficking women children Immoral Traffic Prevention Act",
+    "cyberstalking": "cyberstalking IPC 354D online stalking cybercrime.gov.in",
+    "exposing_personal_information": "doxxing personal data leak IT Act privacy complaint India",
+    "sexual_assault": "sexual assault molestation FIR IPC 354 medical legal aid",
 }
+
+# One descriptive exemplar per crime situation for SBERT cosine fallback.
+# Regex-ladder labels are included so unmatched turns share the same embedding space.
+SITUATION_EXEMPLARS: Dict[str, str] = {
+    "suicide_crisis": (
+        "I want to kill myself and end my life because I am dying every day from despair."
+    ),
+    "help_seeking": (
+        "I am going insane and I do not understand where to go or whom to ask for help."
+    ),
+    "homicide_threat": (
+        "My husband is planning to kill me and has threatened to murder me."
+    ),
+    "rape": (
+        "I was raped last night and the men who raped me threatened me not to complain."
+    ),
+    "gang_rape": (
+        "Several men gang raped me and I need to file a delayed FIR and get a medical exam."
+    ),
+    "torture": (
+        "My father tortures and beats my grandmother for property and I need medical help."
+    ),
+    "kicked_out": (
+        "My husband kicked me out of the house with the children and I have nowhere to stay."
+    ),
+    "workplace_harassment": (
+        "My employer sexually harassed me at the office and then terminated me after I protested."
+    ),
+    "loan_recovery": (
+        "Loan recovery agents are threatening and shaming me at odd hours to repay money."
+    ),
+    "investment_fraud": (
+        "I invested money in an online scheme and they refuse to refund me after the scam."
+    ),
+    "missing_person": (
+        "A family member has not returned home and I need to file a missing person complaint."
+    ),
+    "desertion_bigamy": (
+        "My husband left me and entered another marriage even though we are not divorced."
+    ),
+    "domestic_violence": (
+        "My husband and in-laws beat and abuse me at home and I fear more violence."
+    ),
+    "child_exploitation": (
+        "A shelter home owner sexually assaults teen girls in his care and exploits children and minors."
+    ),
+    "online_harassment": (
+        "Someone sent unsolicited obscene sexual content on social media messenger and coerced me into a sexual relationship."
+    ),
+    "identity_theft": (
+        "Someone stole my identity and is using my name, Aadhaar, and bank details to impersonate me."
+    ),
+    "online_bullying": (
+        "Classmates and peers mock, name-call, and bully me every day on social media and messaging apps."
+    ),
+    "matrimonial_fraud": (
+        "A fake NRI groom and his family cheated me in a fraudulent marriage proposal and robbed me."
+    ),
+    "intimate_content_sharing": (
+        "Someone is sharing my private intimate photos and videos without my consent to defame me."
+    ),
+    "financial_scam": (
+        "Fraudsters tricked me into a UPI or bank transfer and a fake investment financial scam."
+    ),
+    "social_exclusion": (
+        "My community has ostracized and socially excluded me, and I am isolated from family and neighbours."
+    ),
+    "acid_attack": (
+        "Someone threw acid on my face and I need emergency medical care and to file a police complaint."
+    ),
+    "trafficking": (
+        "Women and children are being sold, transported, and held against their will in a trafficking racket."
+    ),
+    "cyberstalking": (
+        "A stalker follows me online, tracks my accounts, and sends repeated threatening messages on Instagram."
+    ),
+    "exposing_personal_information": (
+        "Someone published my phone number, address, and private personal information online without consent."
+    ),
+    "sexual_assault": (
+        "A man touched my private parts without consent and sexually assaulted me when I protested."
+    ),
+}
+
+SEMANTIC_SITUATION_THRESHOLD = 0.45
+SEMANTIC_SITUATION_MAX = 3
 
 
 def _canonical_phrase(entity: str, category: str) -> str:
@@ -222,18 +334,96 @@ def dialogue_situations(victim_text: str) -> List[str]:
     return found
 
 
-def ranking_hints_for_dialogue(victim_text: str) -> str:
+def _situation_cosine_scores(victim_text: str, ranker) -> Dict[str, float]:
+    """Cosine of victim_text against every SITUATION_EXEMPLARS sentence."""
+    names = list(SITUATION_EXEMPLARS.keys())
+    exemplars = [SITUATION_EXEMPLARS[name] for name in names]
+    scores: Dict[str, float] = {name: 0.0 for name in names}
+    if not (victim_text or "").strip() or ranker is None or not exemplars:
+        return scores
+    if hasattr(ranker, "cosine_to_query"):
+        values = ranker.cosine_to_query(victim_text, exemplars)
+        for name, score in zip(names, values):
+            scores[name] = float(score)
+        return scores
+    model = getattr(ranker, "model", None)
+    if model is None:
+        return scores
+    from ktc.ranking import encode_texts_cached
+    import numpy as np
+
+    batch = encode_texts_cached(model, [victim_text.strip(), *exemplars])
+    query_emb = batch[0]
+    text_embs = batch[1:]
+    dots = np.dot(text_embs, query_emb)
+    for name, score in zip(names, dots):
+        scores[name] = float(score)
+    return scores
+
+
+def dialogue_situations_semantic(
+    victim_text: str,
+    ranker,
+    threshold: float = SEMANTIC_SITUATION_THRESHOLD,
+) -> List[str]:
+    """Regex ladder first; if empty, SBERT cosine against situation exemplars."""
+    names, _meta = resolve_dialogue_situations(victim_text, ranker=ranker, threshold=threshold)
+    return names
+
+
+def resolve_dialogue_situations(
+    victim_text: str,
+    ranker=None,
+    threshold: float = SEMANTIC_SITUATION_THRESHOLD,
+    log: bool = True,
+) -> Tuple[List[str], Dict[str, object]]:
+    """Situations plus source metadata for Stage 0.5 logging."""
+    regex = dialogue_situations(victim_text)
+    if regex:
+        if log:
+            logger.info("situation_source=regex categories=%s", ",".join(regex))
+        return regex, {"source": "regex", "scores": {}}
+    if not (victim_text or "").strip() or ranker is None:
+        if log:
+            logger.info("situation_source=semantic score= category=")
+        return [], {"source": "semantic", "scores": {}}
+    scores = _situation_cosine_scores(victim_text, ranker)
+    ranked = sorted(
+        ((name, score) for name, score in scores.items() if score >= threshold),
+        key=lambda item: (-item[1], item[0]),
+    )
+    names = [name for name, _score in ranked[:SEMANTIC_SITUATION_MAX]]
+    if log:
+        if names:
+            top_name, top_score = ranked[0]
+            logger.info(
+                "situation_source=semantic score=%.3f category=%s",
+                top_score,
+                top_name,
+            )
+        else:
+            logger.info("situation_source=semantic score= category=")
+    meta_scores = {name: scores[name] for name in names}
+    return names, {"source": "semantic", "scores": meta_scores}
+
+
+def ranking_hints_for_dialogue(victim_text: str, ranker=None) -> str:
     """Extra tokens so passage ranking matches the constructed live queries."""
-    parts = [_SITUATION_RANK_HINTS[name] for name in dialogue_situations(victim_text) if name in _SITUATION_RANK_HINTS]
+    situations, _meta = resolve_dialogue_situations(victim_text, ranker=ranker, log=False)
+    parts = [_SITUATION_RANK_HINTS[name] for name in situations if name in _SITUATION_RANK_HINTS]
     return " ".join(parts)
 
 
-def _situation_queries(victim_text: str) -> List[SearchQuery]:
+def _situation_queries(
+    victim_text: str,
+    situations: Optional[Sequence[str]] = None,
+) -> List[SearchQuery]:
     """Queries built from the dialogue situation, not from a single keyword."""
     text = _lower(victim_text)
     queries: List[SearchQuery] = []
     year = CURRENT_YEAR
-    for name in dialogue_situations(victim_text):
+    names = list(situations) if situations is not None else dialogue_situations(victim_text)
+    for name in names:
         if name == "help_seeking":
             queries.extend(
                 [
@@ -381,6 +571,139 @@ def _situation_queries(victim_text: str) -> List[SearchQuery]:
                     "domestic violence",
                     CATEGORY_CRIME,
                     "sit_pwdva",
+                )
+            )
+        elif name == "child_exploitation":
+            queries.extend(
+                [
+                    _sq(
+                        f"POCSO Act child sexual abuse trafficking report Child Welfare Committee India {year}",
+                        "child sexual exploitation",
+                        CATEGORY_CRIME,
+                        "sit_child_exploitation",
+                    ),
+                    _sq(
+                        f"Childline 1098 24x7 helpline child in distress India official {year}",
+                        "child sexual exploitation",
+                        CATEGORY_CRIME,
+                        "sit_child_exploitation",
+                    ),
+                ]
+            )
+        elif name == "online_harassment":
+            queries.extend(
+                [
+                    _sq(
+                        f"IT Act Section 67 67A obscene sexual content online India indiacode.nic.in {year}",
+                        "online sexual harassment",
+                        CATEGORY_CRIME,
+                        "sit_online_harassment",
+                    ),
+                    _sq(
+                        f"report unsolicited obscene messages social media National Cyber Crime Reporting Portal cybercrime.gov.in {year}",
+                        "online sexual harassment",
+                        CATEGORY_CRIME,
+                        "sit_online_harassment",
+                    ),
+                ]
+            )
+        elif name == "identity_theft":
+            queries.append(
+                _sq(
+                    f"identity theft impersonation Aadhaar bank KYC report cybercrime.gov.in India {year}",
+                    "identity theft",
+                    CATEGORY_CRIME,
+                    "sit_identity_theft",
+                )
+            )
+        elif name == "online_bullying":
+            queries.append(
+                _sq(
+                    f"cyberbullying online bullying complaint cybercrime.gov.in India {year}",
+                    "online bullying",
+                    CATEGORY_CRIME,
+                    "sit_online_bullying",
+                )
+            )
+        elif name == "matrimonial_fraud":
+            queries.append(
+                _sq(
+                    f"fraudulent marriage NRI groom matrimonial scam police complaint India {year}",
+                    "matrimonial fraud",
+                    CATEGORY_CRIME,
+                    "sit_matrimonial_fraud",
+                )
+            )
+        elif name == "intimate_content_sharing":
+            queries.append(
+                _sq(
+                    f"non-consensual intimate images videos IT Act 67A cybercrime.gov.in India {year}",
+                    "intimate image abuse",
+                    CATEGORY_CRIME,
+                    "sit_intimate_content",
+                )
+            )
+        elif name == "financial_scam":
+            queries.append(
+                _sq(
+                    f"financial scam UPI bank fraud report cybercrime.gov.in India {year}",
+                    "financial scam",
+                    CATEGORY_CRIME,
+                    "sit_financial_scam",
+                )
+            )
+        elif name == "social_exclusion":
+            queries.append(
+                _sq(
+                    f"social exclusion ostracism community boycott support helpline India {year}",
+                    "social exclusion",
+                    CATEGORY_MENTAL_HEALTH,
+                    "sit_social_exclusion",
+                )
+            )
+        elif name == "acid_attack":
+            queries.append(
+                _sq(
+                    f"acid attack FIR medical treatment compensation India official {year}",
+                    "acid attack",
+                    CATEGORY_CRIME,
+                    "sit_acid_attack",
+                )
+            )
+        elif name == "trafficking":
+            queries.append(
+                _sq(
+                    f"human trafficking women children Immoral Traffic Prevention Act India {year}",
+                    "trafficking",
+                    CATEGORY_CRIME,
+                    "sit_trafficking",
+                )
+            )
+        elif name == "cyberstalking":
+            queries.append(
+                _sq(
+                    f"cyberstalking IPC 354D online stalking report cybercrime.gov.in India {year}",
+                    "cyberstalking",
+                    CATEGORY_CRIME,
+                    "sit_cyberstalking",
+                )
+            )
+        elif name == "exposing_personal_information":
+            queries.append(
+                _sq(
+                    f"personal data leaked online doxxing complaint IT Act India {year}",
+                    "exposing personal information",
+                    CATEGORY_CRIME,
+                    "sit_exposing_personal_info",
+                )
+            )
+        elif name == "sexual_assault":
+            queries.append(
+                _sq(
+                    f"sexual assault molestation FIR IPC 354 medical legal aid India {year}",
+                    "sexual assault",
+                    CATEGORY_CRIME,
+                    "sit_sexual_assault",
                 )
             )
     # Prefer queries whose tokens overlap the utterance when two situations compete.
@@ -585,10 +908,21 @@ def build_queries(
     max_queries: int = 3,
     crime_context: Optional[str] = None,
     victim_text: str = "",
+    ranker=None,
+    situation_threshold: float = SEMANTIC_SITUATION_THRESHOLD,
+    situations: Optional[Sequence[str]] = None,
 ) -> List[SearchQuery]:
     """Build search queries from the dialogue situation, then entity templates."""
     entities = list(entities or [])
-    situations = dialogue_situations(victim_text)
+    if situations is None:
+        situations, _meta = resolve_dialogue_situations(
+            victim_text,
+            ranker=ranker,
+            threshold=situation_threshold,
+            log=False,
+        )
+    else:
+        situations = list(situations)
     skip_templates = set()
     if situations:
         skip_templates.update(
@@ -619,7 +953,7 @@ def build_queries(
     )
 
     built: List[SearchQuery] = []
-    built.extend(_situation_queries(victim_text))
+    built.extend(_situation_queries(victim_text, situations=situations))
     for entity in ordered_entities:
         raw_text = entity["text"]
         category = entity["category"]
