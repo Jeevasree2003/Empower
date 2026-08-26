@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Protocol, Sequence, Tuple, runtime_checkable
 
@@ -10,6 +11,8 @@ import re
 
 from ktc.knowledge_item import KnowledgeCandidate
 from ktc.triplet import Triplet
+
+logger = logging.getLogger(__name__)
 
 MIN_COSINE = 0.38
 MAX_RANKED = 16
@@ -194,6 +197,100 @@ class SentenceBertRanker:
         text_embs = batch[1:]
         scores = np.dot(text_embs, query_emb)
         return [float(score) for score in scores]
+
+
+class TfidfRanker:
+    """Offline CandidateRanker using sklearn TF-IDF cosine similarity (no network)."""
+
+    def __init__(self):
+        from sklearn.feature_extraction.text import TfidfVectorizer
+
+        self._vectorizer_cls = TfidfVectorizer
+        self.model = None
+
+    def _cosine_matrix(self, query: str, texts: Sequence[str]) -> np.ndarray:
+        from sklearn.metrics.pairwise import cosine_similarity
+
+        docs = [query.strip() or " ", *[item or " " for item in texts]]
+        matrix = self._vectorizer_cls(min_df=1).fit_transform(docs)
+        sims = cosine_similarity(matrix[0:1], matrix[1:])
+        return np.asarray(sims).reshape(-1)
+
+    def rank_with_scores(
+        self, dialog_history: str, triplets: Iterable[Triplet], top_k: int = 26
+    ) -> RankingResult:
+        triplet_list = list(triplets)
+        if not triplet_list:
+            return RankingResult(triplets=[], scores=[], top1_score=0.0)
+        texts = [item.as_text() for item in triplet_list]
+        scores = self._cosine_matrix(dialog_history.strip() or " ", texts)
+        order = _stable_rank_order(scores, top_k)
+        ranked = [triplet_list[i] for i in order]
+        ranked_scores = [float(scores[i]) for i in order]
+        return RankingResult(
+            triplets=ranked,
+            scores=ranked_scores,
+            top1_score=ranked_scores[0] if ranked_scores else 0.0,
+        )
+
+    def rank(self, dialog_history: str, triplets: Iterable[Triplet], top_k: int = 26) -> List[Triplet]:
+        return self.rank_with_scores(dialog_history, triplets, top_k=top_k).triplets
+
+    def rank_candidates_with_scores(
+        self, dialog_history: str, candidates: Iterable[KnowledgeCandidate], top_k: int = 26
+    ) -> CandidateRankingResult:
+        candidate_list = list(candidates)
+        if not candidate_list:
+            return CandidateRankingResult(candidates=[], scores=[], top1_score=0.0)
+        texts = [item.text for item in candidate_list]
+        scores = self._cosine_matrix(dialog_history.strip() or " ", texts)
+        order = _stable_rank_order(scores, top_k)
+        ranked = [candidate_list[i] for i in order]
+        ranked_scores = [float(scores[i]) for i in order]
+        return CandidateRankingResult(
+            candidates=ranked,
+            scores=ranked_scores,
+            top1_score=ranked_scores[0] if ranked_scores else 0.0,
+        )
+
+    def cosine_to_query(self, query: str, texts: List[str]) -> List[float]:
+        if not texts:
+            return []
+        scores = self._cosine_matrix(query, texts)
+        return [float(score) for score in scores]
+
+
+def _huggingface_load_errors() -> tuple:
+    errors = [OSError]
+    try:
+        from huggingface_hub.errors import HfHubHTTPError, LocalEntryNotFoundError
+
+        errors.extend([HfHubHTTPError, LocalEntryNotFoundError])
+    except ImportError:
+        try:
+            from huggingface_hub.utils import HfHubHTTPError
+
+            errors.append(HfHubHTTPError)
+        except ImportError:
+            pass
+    return tuple(errors)
+
+
+def get_ranker(prefer: str = "sbert"):
+    """Construct a CandidateRanker. ``auto`` tries SBERT then TF-IDF on HF/network errors."""
+    backend = (prefer or "sbert").strip().lower()
+    if backend == "tfidf":
+        logger.info("ranker_backend=tfidf")
+        return TfidfRanker()
+    if backend not in {"sbert", "auto"}:
+        raise ValueError(f"Unknown ranker backend: {prefer}")
+    if backend == "sbert":
+        return SentenceBertRanker()
+    try:
+        return SentenceBertRanker()
+    except _huggingface_load_errors() as exc:
+        logger.warning("sbert_unavailable error=%s; falling back to TfidfRanker", exc)
+        return TfidfRanker()
 
 
 class CrossEncoderReranker:

@@ -110,6 +110,11 @@ _MEDIUM_TERMS = (
     "social media",
 )
 
+_SPACY_NER_LABELS = frozenset({"PERSON", "ORG", "GPE", "LAW", "NORP"})
+SOURCE_LEXICON = "lexicon"
+SOURCE_SPACY_NER = "spacy_ner"
+SOURCE_NOUN_CHUNK = "noun_chunk"
+
 _SECTION_RE = re.compile(r"\bsection\s+(\d+[A-Za-z]?)\b", re.IGNORECASE)
 _IT_ACT_SECTION_RE = re.compile(r"\b(?:sec(?:tion)?\.?\s*)?66[A-Za-z]?\b", re.IGNORECASE)
 
@@ -169,22 +174,59 @@ def _find_lexicon_matches(text: str, terms: tuple[str, ...]) -> List[str]:
     return found
 
 
-def _entities_from_spacy(text: str, nlp) -> List[Dict[str, str]]:
-    doc = nlp(text)
-    entities: List[Dict[str, str]] = []
+def _category_for_ner_label(span: str, label: str) -> Optional[str]:
+    if label == "LAW":
+        return CATEGORY_LEGAL
+    if label == "ORG" and "police" in span.lower():
+        return CATEGORY_LEGAL
+    return None
+
+
+def _entities_from_spacy_ner(doc) -> List[Dict[str, Optional[str]]]:
+    """Keep PERSON/ORG/GPE/LAW/NORP spans as a secondary pass."""
+    entities: List[Dict[str, Optional[str]]] = []
     skip_bits = ("mental", "insane", "helpline", "kiran", "icall", "health")
     for ent in doc.ents:
         span = ent.text.strip()
+        if ent.label_ not in _SPACY_NER_LABELS:
+            continue
         if any(bit in span.lower() for bit in skip_bits):
             continue
-        if ent.label_ == "LAW":
-            entities.append({"text": span, "category": CATEGORY_LEGAL})
-        elif ent.label_ == "ORG" and "police" in span.lower():
-            entities.append({"text": span, "category": CATEGORY_LEGAL})
-        elif ent.label_ in {"ORG", "GPE"} and len(span.split()) <= 4:
+        if len(span) < 2:
             continue
-        elif ent.label_ == "PRODUCT":
+        entities.append(
+            {
+                "text": span,
+                "category": _category_for_ner_label(span, ent.label_),
+                "source": SOURCE_SPACY_NER,
+            }
+        )
+    return entities
+
+
+def _entities_from_noun_chunks(doc) -> List[Dict[str, Optional[str]]]:
+    """Noun-chunk fallback when NER found nothing; skip unigrams and stopword-only chunks."""
+    entities: List[Dict[str, Optional[str]]] = []
+    for chunk in doc.noun_chunks:
+        tokens = [tok for tok in chunk if not tok.is_space]
+        if len(tokens) <= 1:
             continue
+        if all(tok.is_stop or tok.is_punct for tok in tokens):
+            continue
+        span = chunk.text.strip()
+        if len(span) < 2:
+            continue
+        entities.append({"text": span, "category": None, "source": SOURCE_NOUN_CHUNK})
+    return entities
+
+
+def _entities_from_spacy(text: str, nlp) -> List[Dict[str, str]]:
+    """Legacy helper: LAW / police-ORG spans used by older call sites."""
+    doc = nlp(text)
+    entities: List[Dict[str, str]] = []
+    for item in _entities_from_spacy_ner(doc):
+        if item.get("category"):
+            entities.append({"text": item["text"], "category": item["category"]})
     return entities
 
 
@@ -200,13 +242,21 @@ def extract_entities(victim_utterance: str, nlp=None) -> List[Dict[str, str]]:
 
     seen = set()
     entities: List[Dict[str, str]] = []
+    lexicon_texts = set()
 
-    def add(text: str, category: str) -> None:
-        key = (_normalize(text), category)
+    def add(text: str, category: Optional[str], source: str = SOURCE_LEXICON) -> None:
+        key = (_normalize(text), category or "", source)
         if key in seen or len(text.strip()) < 2:
             return
         seen.add(key)
-        entities.append({"text": text.strip(), "category": category})
+        item: Dict[str, str] = {"text": text.strip(), "source": source}
+        if category:
+            item["category"] = category
+        else:
+            item["category"] = None  # type: ignore[assignment]
+        entities.append(item)
+        if source == SOURCE_LEXICON:
+            lexicon_texts.add(_normalize(text))
 
     for term in _find_lexicon_matches(victim_utterance, _CRIME_TERMS):
         add(term, CATEGORY_CRIME)
@@ -269,24 +319,62 @@ def extract_entities(victim_utterance: str, nlp=None) -> List[Dict[str, str]]:
     for match in _IT_ACT_SECTION_RE.finditer(victim_utterance):
         add(match.group(0), CATEGORY_LEGAL)
 
-    for ent in _entities_from_spacy(victim_utterance, nlp):
-        add(ent["text"], ent["category"])
+    doc = nlp(victim_utterance)
+    ner_hits = _entities_from_spacy_ner(doc)
+    for ent in ner_hits:
+        if _normalize(ent["text"]) in lexicon_texts:
+            continue
+        add(ent["text"], ent.get("category"), SOURCE_SPACY_NER)
+    if not ner_hits:
+        for ent in _entities_from_noun_chunks(doc):
+            if _normalize(ent["text"]) in lexicon_texts:
+                continue
+            add(ent["text"], ent.get("category"), SOURCE_NOUN_CHUNK)
 
     return entities
 
 
 def extract_entities_from_history(dialog_history: str, nlp=None) -> List[Dict[str, str]]:
-    """Extract entities from the most recent victim utterance in formatted history."""
-    victim_lines = [line for line in dialog_history.split(" victim: ") if line.strip()]
-    if not victim_lines:
-        return []
-    last = victim_lines[-1]
-    # strip trailing agent turns if concatenated
-    if " agent: " in last:
-        last = last.split(" agent: ")[0]
-    if last.startswith("victim: "):
-        last = last[len("victim: ") :]
-    return extract_entities(last, nlp=nlp)
+    """Union entities from every victim/user utterance in formatted dialog history."""
+    from ktc.live_knowledge import victim_utterances_from_history
+
+    utterances = victim_utterances_from_history(dialog_history)
+    if not utterances:
+        # Legacy splitter for histories that are not role-prefixed.
+        victim_lines = [line for line in dialog_history.split(" victim: ") if line.strip()]
+        if not victim_lines:
+            return []
+        utterances = []
+        for line in victim_lines:
+            last = line
+            if " agent: " in last:
+                last = last.split(" agent: ")[0]
+            if last.startswith("victim: "):
+                last = last[len("victim: ") :]
+            if last.strip():
+                utterances.append(last.strip())
+    seen = set()
+    merged: List[Dict[str, str]] = []
+    for utterance in utterances:
+        for item in extract_entities(utterance, nlp=nlp):
+            key = (
+                _normalize(item.get("text") or ""),
+                item.get("category") or "",
+                item.get("source") or "",
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
+    return merged
+
+
+def has_confident_entities(entities: Sequence[Dict[str, str]]) -> bool:
+    """True when any entity came from the lexicon or spaCy NER (not noun-chunk-only)."""
+    return any(
+        item.get("source") in {SOURCE_LEXICON, SOURCE_SPACY_NER} or item.get("category")
+        for item in entities or []
+    )
 
 
 def split_utterance_clauses(victim_utterance: str) -> List[str]:
@@ -362,15 +450,19 @@ def resolve_entities(
     log: bool = True,
 ) -> List[Dict[str, str]]:
     """Lexicon extract_entities first; semantic clause tagging only if lexicon is empty."""
-    lexicon = extract_entities(victim_utterance, nlp=nlp)
+    extracted = extract_entities(victim_utterance, nlp=nlp)
+    lexicon = [item for item in extracted if item.get("source") == SOURCE_LEXICON]
     if lexicon:
         if log:
             logger.info("entity_source=lexicon count=%s", len(lexicon))
-        return lexicon
+        return extracted
     if ranker is None or not (victim_utterance or "").strip():
         if log:
-            logger.info("entity_source=none")
-        return []
+            if extracted:
+                logger.info("entity_source=spacy count=%s", len(extracted))
+            else:
+                logger.info("entity_source=none")
+        return extracted
     semantic, scored = _semantic_entities_with_scores(victim_utterance, ranker, threshold)
     if semantic:
         if log:
@@ -384,5 +476,5 @@ def resolve_entities(
         return semantic
     if log:
         logger.info("entity_source=none")
-    return []
+    return extracted
 

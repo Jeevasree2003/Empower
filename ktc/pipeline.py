@@ -18,7 +18,7 @@ from ktc.counseling_bank import (
     counseling_candidates,
 )
 from ktc.case_memory import CaseMemory
-from ktc.entity_extraction import extract_entities
+from ktc.entity_extraction import extract_entities, extract_entities_from_history, has_confident_entities
 from ktc.extraction import extract_triplets
 from ktc.filtering import filter_triplets
 from ktc.knowledge_item import KnowledgeCandidate
@@ -41,9 +41,9 @@ from ktc.ranking import (
     MAX_RANKED,
     MIN_COSINE,
     CandidateRanker,
-    SentenceBertRanker,
     rank_candidates,
     ranking_query_from_history,
+    get_ranker,
 )
 from ktc.reply_knowledge import is_ktc_usable, is_reply_usable
 from ktc.synthesis import DEFAULT_SYNTHESIS_MODEL, synthesize_evidence
@@ -255,6 +255,7 @@ class KnowledgeTripletPipeline:
     verbalization_backend: str = "llm"
     synthesis_model: str = DEFAULT_SYNTHESIS_MODEL
     ranker: Optional[CandidateRanker] = field(default=None, repr=False)
+    ranker_backend: str = "auto"
     _nlp: Optional[object] = field(default=None, repr=False)
     _passage_cache: Dict[str, List[Triplet]] = field(default_factory=dict, repr=False)
     live_config: LiveRetrievalConfig = field(default_factory=LiveRetrievalConfig.load)
@@ -262,7 +263,10 @@ class KnowledgeTripletPipeline:
 
     def __post_init__(self):
         if self.api_budget is None:
-            self.api_budget = ApiCallBudget(self.live_config.max_api_calls_per_run)
+            self.api_budget = ApiCallBudget(
+                self.live_config.max_api_calls_per_run,
+                per_dialogue_limit=self.live_config.per_dialogue_budget,
+            )
 
     def _get_nlp(self):
         if self._nlp is None:
@@ -273,7 +277,7 @@ class KnowledgeTripletPipeline:
 
     def _get_ranker(self) -> CandidateRanker:
         if self.ranker is None:
-            self.ranker = SentenceBertRanker()
+            self.ranker = get_ranker(self.ranker_backend)
         return self.ranker
 
     def _triplets_from_passage(self, passage: str) -> List[Triplet]:
@@ -296,9 +300,10 @@ class KnowledgeTripletPipeline:
         passages = split_knowledge_passages(knowledge_text)
         query = ranking_query_from_history(dialog_history, nlp=self._get_nlp()) if dialog_history else ""
         if query:
-            search_domains = content_need_domains(
-                extract_entities(query, nlp=self._get_nlp()), query
-            )
+            query_entities = extract_entities(query, nlp=self._get_nlp())
+            if not has_confident_entities(query_entities) and dialog_history:
+                query_entities = extract_entities_from_history(dialog_history, nlp=self._get_nlp())
+            search_domains = content_need_domains(query_entities, query)
             selected = select_dual_domain_passages(
                 passages,
                 query,
@@ -393,11 +398,14 @@ class KnowledgeTripletPipeline:
     ) -> HybridRunResult:
         nlp = self._get_nlp()
         ranker = self._get_ranker()
+        self.api_budget.set_dialogue(str(dialogue_id) if dialogue_id else None)
         query = ranking_query_from_history(dialog_history, nlp=nlp, ranker=ranker)
         victim_turns = victim_utterances_from_history(dialog_history)
         victim_span = " ".join(victim_turns[-2:])
         situation_text = " ".join(victim_turns) or victim_span
         entities = extract_entities(victim_span, nlp=nlp)
+        if not has_confident_entities(entities) and dialog_history:
+            entities = extract_entities_from_history(dialog_history, nlp=nlp)
         situations, situation_meta = resolve_dialogue_situations(victim_span, ranker=ranker)
         if not situations and situation_text.strip() and situation_text.strip() != victim_span.strip():
             situations, situation_meta = resolve_dialogue_situations(situation_text, ranker=ranker)
