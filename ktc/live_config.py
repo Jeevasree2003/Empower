@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List
+from typing import Dict, List, Optional
+import threading
 
 import yaml
 
@@ -26,6 +27,15 @@ class LiveRetrievalConfig:
     llm_model: str = "gpt-4o-mini"
     llm_api_base: str = ""
     estimated_cost_per_dialogue_usd: float = 0.03
+    page_fetch_timeout: int = 8
+    search_timeout: int = 10
+    failure_cache_ttl_days: int = 1
+    max_concurrent_fetches: int = 4
+    max_concurrent_queries: int = 3
+    max_live_retrieval_seconds: float = 20
+    live_sentence_top_k: int = 8
+    live_sentence_candidates_per_page: int = 8
+    per_dialogue_budget: Optional[int] = None
     trusted_domains: List[str] = field(default_factory=list)
     config_path: Path = field(default_factory=lambda: DEFAULT_CONFIG_PATH)
     domains_path: Path = field(default_factory=lambda: DEFAULT_DOMAINS_PATH)
@@ -63,6 +73,27 @@ class LiveRetrievalConfig:
             llm_model=str(data.get("llm_model", "gpt-4o-mini")),
             llm_api_base=str(data.get("llm_api_base", "") or ""),
             estimated_cost_per_dialogue_usd=float(data.get("estimated_cost_per_dialogue_usd", 0.03)),
+            page_fetch_timeout=int(data.get("page_fetch_timeout", 8)),
+            search_timeout=int(data.get("search_timeout", 10)),
+            failure_cache_ttl_days=int(data.get("failure_cache_ttl_days", 1)),
+            max_concurrent_fetches=int(data.get("max_concurrent_fetches", 4)),
+            max_concurrent_queries=int(data.get("max_concurrent_queries", 3)),
+            max_live_retrieval_seconds=float(data.get("max_live_retrieval_seconds", 20)),
+            live_sentence_candidates_per_page=int(
+                data.get(
+                    "live_sentence_candidates_per_page",
+                    data.get("live_sentence_top_k", 8),
+                )
+            ),
+            live_sentence_top_k=int(
+                data.get(
+                    "live_sentence_candidates_per_page",
+                    data.get("live_sentence_top_k", 8),
+                )
+            ),
+            per_dialogue_budget=(
+                int(data["per_dialogue_budget"]) if data.get("per_dialogue_budget") not in (None, "") else None
+            ),
             trusted_domains=sorted(set(trusted)),
             config_path=config_path,
             domains_path=domains_path,
@@ -70,17 +101,38 @@ class LiveRetrievalConfig:
 
 
 class ApiCallBudget:
-    """Track API calls against per-run ceiling."""
+    """Track API calls against per-run ceiling, optionally per dialogue_id."""
 
-    def __init__(self, limit: int):
+    def __init__(self, limit: int, per_dialogue_limit: Optional[int] = None):
         self.limit = limit
+        self.per_dialogue_limit = per_dialogue_limit
         self.used = 0
+        self._by_dialogue: Dict[str, int] = {}
+        self._current_dialogue: Optional[str] = None
+        self._lock = threading.Lock()
+
+    def set_dialogue(self, dialogue_id: Optional[str]) -> None:
+        with self._lock:
+            self._current_dialogue = str(dialogue_id) if dialogue_id else None
 
     def can_call(self) -> bool:
-        return self.used < self.limit
+        with self._lock:
+            if self.used >= self.limit:
+                return False
+            if self.per_dialogue_limit is None or not self._current_dialogue:
+                return True
+            return self._by_dialogue.get(self._current_dialogue, 0) < self.per_dialogue_limit
 
     def record(self, count: int = 1) -> bool:
-        if self.used + count > self.limit:
-            return False
-        self.used += count
-        return True
+        """Atomically reserve ``count`` calls. Returns False without incrementing if over limit."""
+        with self._lock:
+            if self.used + count > self.limit:
+                return False
+            dialogue_id = self._current_dialogue
+            if self.per_dialogue_limit is not None and dialogue_id:
+                current = self._by_dialogue.get(dialogue_id, 0)
+                if current + count > self.per_dialogue_limit:
+                    return False
+                self._by_dialogue[dialogue_id] = current + count
+            self.used += count
+            return True

@@ -29,8 +29,8 @@ def main():
     parser.add_argument(
         "--enable-live",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Include hybrid live retrieval candidates (default: on).",
+        default=False,
+        help="Include hybrid live retrieval candidates (default: off; --enable-live to fetch).",
     )
     parser.add_argument(
         "--coref-backend",

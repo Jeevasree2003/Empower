@@ -2,13 +2,61 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
-from typing import Iterable, List, Optional, Protocol, Tuple, runtime_checkable
+from typing import Dict, Iterable, List, Optional, Protocol, Sequence, Tuple, runtime_checkable
 
 import numpy as np
+import re
 
 from ktc.knowledge_item import KnowledgeCandidate
 from ktc.triplet import Triplet
+
+logger = logging.getLogger(__name__)
+
+MIN_COSINE = 0.38
+MAX_RANKED = 16
+
+# Process-level cache: (id(model), normalized text) -> embedding vector.
+_TEXT_EMBEDDING_CACHE: Dict[Tuple[int, str], np.ndarray] = {}
+
+
+def _embed_cache_key(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip().lower())
+
+
+def clear_text_embedding_cache() -> None:
+    _TEXT_EMBEDDING_CACHE.clear()
+
+
+def encode_texts_cached(model, texts: Sequence[str], *, normalize_embeddings: bool = True) -> np.ndarray:
+    """Encode texts, reusing embeddings for normalized strings already seen on this model."""
+    items = list(texts)
+    if not items:
+        return np.zeros((0, 0), dtype=float)
+    model_id = id(model)
+    keys = [_embed_cache_key(text) for text in items]
+    missing_pos: List[int] = []
+    missing_texts: List[str] = []
+    seen_missing: Dict[str, int] = {}
+    for index, (text, key) in enumerate(zip(items, keys)):
+        cache_key = (model_id, key)
+        if cache_key in _TEXT_EMBEDDING_CACHE:
+            continue
+        if key in seen_missing:
+            continue
+        seen_missing[key] = index
+        missing_pos.append(index)
+        missing_texts.append(text)
+    if missing_texts:
+        raw = model.encode(missing_texts, normalize_embeddings=normalize_embeddings)
+        encoded = np.asarray(raw, dtype=float)
+        if encoded.ndim == 1:
+            encoded = encoded.reshape(1, -1)
+        for text_index, row in zip(missing_pos, encoded):
+            _TEXT_EMBEDDING_CACHE[(model_id, keys[text_index])] = np.asarray(row, dtype=float)
+    stacked = np.stack([_TEXT_EMBEDDING_CACHE[(model_id, key)] for key in keys])
+    return stacked
 
 
 @dataclass
@@ -46,6 +94,53 @@ def _stable_rank_order(scores: np.ndarray, top_k: int) -> np.ndarray:
     return np.lexsort((indices, -scores))[:top_k]
 
 
+def ranking_query_from_history(dialog_history: str, nlp=None, ranker=None) -> str:
+    """Build the ranking text from the last 1–2 victim/user utterances.
+
+    Bot/agent greetings are excluded. The latest victim turn is repeated so it
+    outweighs the previous one. Extracted entities are appended as extra tokens.
+    """
+    from ktc.entity_extraction import extract_entities
+    from ktc.live_knowledge import victim_utterances_from_history
+
+    utterances = victim_utterances_from_history(dialog_history)
+    if not utterances:
+        return ""
+    recent = utterances[-2:]
+    if len(recent) == 1:
+        text = recent[0]
+    else:
+        text = f"{recent[0]} {recent[1]} {recent[1]}"
+    entities = extract_entities(" ".join(recent), nlp=nlp)
+    extra = " ".join(entity["text"] for entity in entities)
+    from ktc.query_builder import ranking_hints_for_dialogue
+
+    hints = ranking_hints_for_dialogue(" ".join(recent), ranker=ranker)
+    return f"{text} {extra} {hints}".strip()
+
+
+def apply_score_gate(
+    candidates: List[KnowledgeCandidate],
+    scores: List[float],
+    *,
+    min_cosine: float = MIN_COSINE,
+    top_k: int = MAX_RANKED,
+) -> Tuple[List[KnowledgeCandidate], List[float], float]:
+    """Keep candidates with cosine >= *min_cosine*, at most *top_k*."""
+    top1 = scores[0] if scores else 0.0
+    kept_c: List[KnowledgeCandidate] = []
+    kept_s: List[float] = []
+    for candidate, score in zip(candidates, scores):
+        if score < min_cosine:
+            continue
+        kept_c.append(candidate)
+        kept_s.append(score)
+        if len(kept_c) >= top_k:
+            break
+    return kept_c, kept_s, top1
+
+
+
 class SentenceBertRanker:
     def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
         from sentence_transformers import SentenceTransformer
@@ -60,9 +155,9 @@ class SentenceBertRanker:
             return RankingResult(triplets=[], scores=[], top1_score=0.0)
 
         history_text = dialog_history.strip() or " "
-        history_emb = self.model.encode(history_text, normalize_embeddings=True)
+        history_emb = encode_texts_cached(self.model, [history_text])[0]
         triplet_texts = [t.as_text() for t in triplet_list]
-        triplet_embs = self.model.encode(triplet_texts, normalize_embeddings=True)
+        triplet_embs = encode_texts_cached(self.model, triplet_texts)
 
         scores = np.dot(triplet_embs, history_emb)
         order = _stable_rank_order(scores, top_k)
@@ -82,9 +177,9 @@ class SentenceBertRanker:
             return CandidateRankingResult(candidates=[], scores=[], top1_score=0.0)
 
         history_text = dialog_history.strip() or " "
-        history_emb = self.model.encode(history_text, normalize_embeddings=True)
+        history_emb = encode_texts_cached(self.model, [history_text])[0]
         texts = [c.text for c in candidate_list]
-        embs = self.model.encode(texts, normalize_embeddings=True)
+        embs = encode_texts_cached(self.model, texts)
 
         scores = np.dot(embs, history_emb)
         order = _stable_rank_order(scores, top_k)
@@ -92,6 +187,110 @@ class SentenceBertRanker:
         ranked_scores = [float(scores[i]) for i in order]
         top1 = ranked_scores[0] if ranked_scores else 0.0
         return CandidateRankingResult(candidates=ranked, scores=ranked_scores, top1_score=top1)
+
+    def cosine_to_query(self, query: str, texts: List[str]) -> List[float]:
+        """Cosine similarity of each text to *query* using this ranker's encoder."""
+        if not texts:
+            return []
+        batch = encode_texts_cached(self.model, [query.strip() or " ", *list(texts)])
+        query_emb = batch[0]
+        text_embs = batch[1:]
+        scores = np.dot(text_embs, query_emb)
+        return [float(score) for score in scores]
+
+
+class TfidfRanker:
+    """Offline CandidateRanker using sklearn TF-IDF cosine similarity (no network)."""
+
+    def __init__(self):
+        from sklearn.feature_extraction.text import TfidfVectorizer
+
+        self._vectorizer_cls = TfidfVectorizer
+        self.model = None
+
+    def _cosine_matrix(self, query: str, texts: Sequence[str]) -> np.ndarray:
+        from sklearn.metrics.pairwise import cosine_similarity
+
+        docs = [query.strip() or " ", *[item or " " for item in texts]]
+        matrix = self._vectorizer_cls(min_df=1).fit_transform(docs)
+        sims = cosine_similarity(matrix[0:1], matrix[1:])
+        return np.asarray(sims).reshape(-1)
+
+    def rank_with_scores(
+        self, dialog_history: str, triplets: Iterable[Triplet], top_k: int = 26
+    ) -> RankingResult:
+        triplet_list = list(triplets)
+        if not triplet_list:
+            return RankingResult(triplets=[], scores=[], top1_score=0.0)
+        texts = [item.as_text() for item in triplet_list]
+        scores = self._cosine_matrix(dialog_history.strip() or " ", texts)
+        order = _stable_rank_order(scores, top_k)
+        ranked = [triplet_list[i] for i in order]
+        ranked_scores = [float(scores[i]) for i in order]
+        return RankingResult(
+            triplets=ranked,
+            scores=ranked_scores,
+            top1_score=ranked_scores[0] if ranked_scores else 0.0,
+        )
+
+    def rank(self, dialog_history: str, triplets: Iterable[Triplet], top_k: int = 26) -> List[Triplet]:
+        return self.rank_with_scores(dialog_history, triplets, top_k=top_k).triplets
+
+    def rank_candidates_with_scores(
+        self, dialog_history: str, candidates: Iterable[KnowledgeCandidate], top_k: int = 26
+    ) -> CandidateRankingResult:
+        candidate_list = list(candidates)
+        if not candidate_list:
+            return CandidateRankingResult(candidates=[], scores=[], top1_score=0.0)
+        texts = [item.text for item in candidate_list]
+        scores = self._cosine_matrix(dialog_history.strip() or " ", texts)
+        order = _stable_rank_order(scores, top_k)
+        ranked = [candidate_list[i] for i in order]
+        ranked_scores = [float(scores[i]) for i in order]
+        return CandidateRankingResult(
+            candidates=ranked,
+            scores=ranked_scores,
+            top1_score=ranked_scores[0] if ranked_scores else 0.0,
+        )
+
+    def cosine_to_query(self, query: str, texts: List[str]) -> List[float]:
+        if not texts:
+            return []
+        scores = self._cosine_matrix(query, texts)
+        return [float(score) for score in scores]
+
+
+def _huggingface_load_errors() -> tuple:
+    errors = [OSError]
+    try:
+        from huggingface_hub.errors import HfHubHTTPError, LocalEntryNotFoundError
+
+        errors.extend([HfHubHTTPError, LocalEntryNotFoundError])
+    except ImportError:
+        try:
+            from huggingface_hub.utils import HfHubHTTPError
+
+            errors.append(HfHubHTTPError)
+        except ImportError:
+            pass
+    return tuple(errors)
+
+
+def get_ranker(prefer: str = "sbert"):
+    """Construct a CandidateRanker. ``auto`` tries SBERT then TF-IDF on HF/network errors."""
+    backend = (prefer or "sbert").strip().lower()
+    if backend == "tfidf":
+        logger.info("ranker_backend=tfidf")
+        return TfidfRanker()
+    if backend not in {"sbert", "auto"}:
+        raise ValueError(f"Unknown ranker backend: {prefer}")
+    if backend == "sbert":
+        return SentenceBertRanker()
+    try:
+        return SentenceBertRanker()
+    except _huggingface_load_errors() as exc:
+        logger.warning("sbert_unavailable error=%s; falling back to TfidfRanker", exc)
+        return TfidfRanker()
 
 
 class CrossEncoderReranker:
@@ -137,6 +336,50 @@ class CrossEncoderReranker:
         top1 = ranked_scores[0] if ranked_scores else 0.0
         return CandidateRankingResult(candidates=ranked, scores=ranked_scores, top1_score=top1)
 
+    def cosine_to_query(self, query: str, texts: List[str]) -> List[float]:
+        return self.bi_encoder.cosine_to_query(query, texts)
+
+
+def cosine_scores_for_query(ranker, query: str, texts: List[str]) -> List[float]:
+    """Score texts against a query with the pipeline ranker's encoder when available."""
+    if not texts:
+        return []
+    method = getattr(ranker, "cosine_to_query", None)
+    if callable(method):
+        return list(method(query, texts))
+    model = getattr(ranker, "model", None)
+    if model is None:
+        return []
+    query_emb = encode_texts_cached(model, [query.strip() or " "])[0]
+    text_embs = encode_texts_cached(model, list(texts))
+    return [float(score) for score in np.dot(text_embs, query_emb)]
+
+
+def select_sentences_by_cosine(
+    query: str,
+    sentences: List[str],
+    ranker,
+    *,
+    min_cosine: float = MIN_COSINE,
+    top_k: int = 3,
+) -> List[Tuple[str, float]]:
+    """Keep up to *top_k* sentences with cosine >= *min_cosine*."""
+    unique: List[str] = []
+    seen = set()
+    for sentence in sentences:
+        key = re.sub(r"\s+", " ", (sentence or "").strip().lower()).rstrip(".!?")
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        unique.append(sentence.strip())
+    if not unique:
+        return []
+    scores = cosine_scores_for_query(ranker, query, unique)
+    if not scores:
+        return []
+    ranked = sorted(zip(unique, scores), key=lambda item: item[1], reverse=True)
+    return [(text, score) for text, score in ranked if score >= min_cosine][:top_k]
+
 
 def rank_triplets(
     dialog_history: str,
@@ -154,10 +397,17 @@ def rank_triplets(
 def rank_candidates(
     dialog_history: str,
     candidates: Iterable[KnowledgeCandidate],
-    top_k: int = 26,
+    top_k: int = MAX_RANKED,
     ranker: Optional[CandidateRanker] = None,
+    min_cosine: float = MIN_COSINE,
 ) -> Tuple[List[KnowledgeCandidate], float]:
     if ranker is None:
         ranker = SentenceBertRanker()
-    result = ranker.rank_candidates_with_scores(dialog_history, candidates, top_k=top_k)
-    return result.candidates, result.top1_score
+    candidate_list = list(candidates)
+    result = ranker.rank_candidates_with_scores(
+        dialog_history, candidate_list, top_k=max(len(candidate_list), 1)
+    )
+    kept, _scores, top1 = apply_score_gate(
+        result.candidates, result.scores, min_cosine=min_cosine, top_k=top_k
+    )
+    return kept, top1

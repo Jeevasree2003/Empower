@@ -67,7 +67,7 @@ def diagnose_dialogue(
     filtered = pipeline.get_filtered_triplets(knowledge)
     static_pool = static_candidates_from_triplets(filtered)
     budget = ApiCallBudget(config.max_api_calls_per_run)
-    live_candidates, queries, _raw = fetch_live_knowledge(victim, config, budget, nlp=pipeline._get_nlp())
+    live_candidates, queries, _raw, _funnel = fetch_live_knowledge(victim, config, budget, nlp=pipeline._get_nlp())
 
     static_result = ranker.rank_candidates_with_scores(history, static_pool, top_k=len(static_pool))
     hybrid_pool = static_pool + live_candidates

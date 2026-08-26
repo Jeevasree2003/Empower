@@ -5,11 +5,12 @@ from __future__ import annotations
 import logging
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional
 
+from ktc.cleaning import strip_legal_citations
 from ktc.live_config import ApiCallBudget, LiveRetrievalConfig
-from ktc.live_retrieval import SearchResult, enrich_search_result
+from ktc.live_retrieval import SearchResult, enrich_search_results
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,17 @@ _SHORT_FACT_MIN_LEN = 8
 _PHONE_PATTERN = re.compile(r"\d{3,}")
 _META_COMMENTARY_PATTERN = re.compile(
     r"(the source does not|this page does not|no information is provided|the text does not mention)",
+    re.IGNORECASE,
+)
+_NON_COUNSELOR_PROSE = re.compile(
+    r"policy makers|member states|\bdaly\b|economic loss|who estimates|"
+    r"100\s*000 population|disability-adjusted",
+    re.IGNORECASE,
+)
+_NAV_FOOTER = re.compile(
+    r"email us at|mon\s*[-–]\s*sat|tue\s*[-–]\s*sat|\bcopyright\b|all rights reserved|"
+    r"icall@tiss\.edu|subscribe|follow us|we mental health\s*&|"
+    r"psychosocial support.{0,20}icall",
     re.IGNORECASE,
 )
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
@@ -75,12 +87,7 @@ def extractive_sentences(query: str, text: str, max_n: int = 3) -> List[str]:
         return []
     tokens = _query_tokens(query)
     ranked: List[tuple] = []
-    for raw in _SENTENCE_SPLIT.split(re.sub(r"\s+", " ", text.strip())):
-        line = raw.strip()
-        if len(line) < 40 or len(line) > 420:
-            continue
-        if _is_meta_commentary(line):
-            continue
+    for line in split_live_sentences(text):
         stoks = set(re.findall(r"[a-z0-9]+", line.lower()))
         overlap = len(tokens & stoks)
         if overlap == 0 and not _PHONE_PATTERN.search(line):
@@ -100,6 +107,28 @@ def extractive_sentences(query: str, text: str, max_n: int = 3) -> List[str]:
     return selected
 
 
+def split_live_sentences(text: str) -> List[str]:
+    """Sentence-split live page text, dropping nav/footer and policy prose."""
+    if not text or not text.strip():
+        return []
+    selected: List[str] = []
+    seen = set()
+    for raw in _SENTENCE_SPLIT.split(re.sub(r"\s+", " ", text.strip())):
+        line = strip_legal_citations(raw.strip())
+        if len(line) < 40 or len(line) > 420:
+            continue
+        if _NAV_FOOTER.search(line) or _is_broken_live_sentence(line) or _is_meta_commentary(line):
+            continue
+        if _NON_COUNSELOR_PROSE.search(line):
+            continue
+        key = line.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(line)
+    return selected
+
+
 @dataclass
 class LiveKnowledgeSentence:
     sentence: str
@@ -112,6 +141,39 @@ class LiveKnowledgeSentence:
             "source_url": self.source_url,
             "query": self.query,
         }
+
+
+@dataclass
+class LivePageStats:
+    url: str
+    query: str
+    sentences_extracted: int
+    sentences: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "url": self.url,
+            "query": self.query,
+            "sentences_extracted": self.sentences_extracted,
+            "sentences": self.sentences,
+        }
+
+
+def is_scraped_boilerplate(text: str) -> bool:
+    return bool(_NAV_FOOTER.search(text or ""))
+
+
+def _is_broken_live_sentence(line: str) -> bool:
+    text = line.strip()
+    if text.startswith("--") or "[...]" in text:
+        return True
+    if re.search(r"\bis not rape\b", text, re.I):
+        return True
+    if text.lower().endswith("constituting a") or text.endswith(","):
+        return True
+    if not re.search(r"[.!?]$", text) and len(text) > 120:
+        return True
+    return False
 
 
 def _is_meta_commentary(line: str) -> bool:
@@ -140,7 +202,12 @@ def _parse_sentences(raw: str) -> List[str]:
         line_norm = line.upper().replace(" ", "_")
         if line_norm == NO_RELEVANT_INFO or line_norm.startswith(f"{NO_RELEVANT_INFO}_"):
             continue
-        if _is_meta_commentary(line):
+        if _is_meta_commentary(line) or _is_broken_live_sentence(line) or is_scraped_boilerplate(line):
+            continue
+        if _NON_COUNSELOR_PROSE.search(line):
+            continue
+        line = strip_legal_citations(line)
+        if not line:
             continue
         if len(line) > 20 or _is_short_fact(line):
             lines.append(line)
@@ -190,6 +257,8 @@ def summarize_search_results(
     results: List[SearchResult],
     config: LiveRetrievalConfig,
     budget: Optional[ApiCallBudget] = None,
+    deadline=None,
+    page_stats: Optional[List[LivePageStats]] = None,
 ) -> List[LiveKnowledgeSentence]:
     """Turn allowlisted search hits into factual sentences. Never raises.
 
@@ -214,21 +283,22 @@ def summarize_search_results(
             client = None
 
     attributed: List[LiveKnowledgeSentence] = []
+    sliced = results[: config.results_per_query]
+    enriched_results = enrich_search_results(sliced, config, deadline=deadline)
 
-    for result in results[: config.results_per_query]:
+    for result, enriched in zip(sliced, enriched_results):
+        if deadline is not None and deadline.expired():
+            break
         try:
-            enriched = enrich_search_result(result, cache_ttl_days=config.cache_ttl_days)
             sentences: List[str] = []
             if use_llm and client is not None:
-                if budget is not None and not budget.can_call():
+                if budget is not None and not budget.record(1):
                     logger.warning(
                         "API call budget exhausted; extractive fallback for query=%r", query
                     )
                     sentences = extractive_sentences(query, enriched.snippet)
                 else:
                     try:
-                        if budget is not None:
-                            budget.record(1)
                         sentences = _summarize_one_source(query, enriched, config, client)
                     except Exception as exc:
                         logger.warning(
@@ -240,6 +310,17 @@ def summarize_search_results(
                         sentences = extractive_sentences(query, enriched.snippet)
             else:
                 sentences = extractive_sentences(query, enriched.snippet)
+
+            split_sentences = split_live_sentences(enriched.snippet)
+            if page_stats is not None:
+                page_stats.append(
+                    LivePageStats(
+                        url=result.url,
+                        query=query,
+                        sentences_extracted=len(split_sentences),
+                        sentences=split_sentences,
+                    )
+                )
 
             for sentence in sentences:
                 attributed.append(

@@ -12,8 +12,8 @@ import random
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
+from ktc.live_config import LiveRetrievalConfig
 from ktc.pipeline import KnowledgeTripletPipeline
-from ktc.triplet import Triplet
 
 KNOWLEDGE_SEP = "__knowledge__"
 NO_PASSAGE_USED = "no_passages_used"
@@ -64,6 +64,29 @@ def format_utterance(utterance: dict) -> str:
     return f"{role}: {utterance['utterance'].strip()}"
 
 
+def process_dialogue_turn(
+    pipeline: KnowledgeTripletPipeline,
+    knowledge_text: str,
+    dialog_history: str,
+    *,
+    knowledge_mode: str = "ktc",
+    enable_live: bool = False,
+    dialogue_id: str = "",
+    turn: object = "",
+):
+    """Run one agent-reply turn. Returns (HybridRunResult or None, verbalized sentences)."""
+    if knowledge_mode == "raw":
+        return None, pipeline.run_raw_knowledge(knowledge_text)
+    result = pipeline.run_hybrid(
+        knowledge_text,
+        dialog_history,
+        enable_live=enable_live,
+        dialogue_id=str(dialogue_id or ""),
+        turn=turn,
+    )
+    return result, result.verbalized
+
+
 def build_turn_examples(
     dialogue: dict,
     pipeline: KnowledgeTripletPipeline,
@@ -74,7 +97,8 @@ def build_turn_examples(
     knowledge_text = dialogue.get("knowledge", "") or ""
     examples: List[dict] = []
     history: List[str] = []
-    filtered_triplets: Optional[List[Triplet]] = None
+    dialogue_id = str(dialogue.get("dialogue_id") or "")
+    bot_turn = 0
 
     for utterance in utterances:
         formatted = format_utterance(utterance)
@@ -82,17 +106,16 @@ def build_turn_examples(
 
         if role == "agent" and history:
             dialog_history = " ".join(history)
-            if knowledge_mode == "raw":
-                verbalized = pipeline.run_raw_knowledge(knowledge_text)
-            else:
-                if filtered_triplets is None:
-                    filtered_triplets = pipeline.get_filtered_triplets(knowledge_text)
-                verbalized = pipeline.run(
-                    knowledge_text,
-                    dialog_history,
-                    filtered=filtered_triplets,
-                    enable_live=enable_live,
-                )
+            _result, verbalized = process_dialogue_turn(
+                pipeline,
+                knowledge_text,
+                dialog_history,
+                knowledge_mode=knowledge_mode,
+                enable_live=enable_live,
+                dialogue_id=dialogue_id,
+                turn=bot_turn,
+            )
+            bot_turn += 1
 
             if verbalized:
                 knowledge_for_training = " ".join(verbalized)
@@ -134,20 +157,25 @@ def preprocess(
     seed: int = 42,
     knowledge_mode: str = "ktc",
     verbalization_backend: str = "llm",
-    coref_backend: str = "model",
-    top_k: int = 26,
+    coref_backend: str = "heuristic",
+    top_k: int = 8,
     max_dialogues: Optional[int] = None,
     enable_live: bool = False,
+    per_dialogue_live_budget: Optional[int] = None,
 ) -> Dict[str, int]:
     dialogues = load_dialogues(input_path)
     if max_dialogues is not None:
         dialogues = dialogues[:max_dialogues]
 
     splits = split_dialogues(dialogues, train_size, valid_size, test_size, seed=seed)
+    live_config = LiveRetrievalConfig.load()
+    if per_dialogue_live_budget is not None:
+        live_config.per_dialogue_budget = int(per_dialogue_live_budget)
     pipeline = KnowledgeTripletPipeline(
         top_k=top_k,
         verbalization_backend=verbalization_backend,
         coref_backend=coref_backend,
+        live_config=live_config,
     )
 
     counts = {}
@@ -196,10 +224,10 @@ def main():
     parser.add_argument(
         "--coref_backend",
         choices=["heuristic", "model"],
-        default="model",
+        default="heuristic",
         help="Coreference backend for Stage 2c (heuristic=local rules, model=coreferee).",
     )
-    parser.add_argument("--top_k", type=int, default=26)
+    parser.add_argument("--top_k", type=int, default=8)
     parser.add_argument(
         "--max_dialogues",
         type=int,
@@ -211,6 +239,13 @@ def main():
         action="store_true",
         default=False,
         help="Opt in to hybrid live retrieval (off by default; uses one shared API budget).",
+    )
+    parser.add_argument(
+        "--per-dialogue-live-budget",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Max live API calls per dialogue_id (default: unset, global budget only).",
     )
     args = parser.parse_args()
 
@@ -227,6 +262,7 @@ def main():
         top_k=args.top_k,
         max_dialogues=args.max_dialogues,
         enable_live=args.enable_live,
+        per_dialogue_live_budget=args.per_dialogue_live_budget,
     )
 
     for split_name, count in counts.items():
