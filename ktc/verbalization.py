@@ -13,8 +13,11 @@ import re
 from typing import Iterable, List, Optional
 
 from ktc.triplet import Triplet
+from ktc.cleaning import normalize_clause_key
 
 logger = logging.getLogger(__name__)
+
+_VERBALIZATION_CACHE: dict = {}
 
 _COPULA_PREFIXES = ("is ", "are ", "was ", "were ", "has been ", "have been ", "had been ")
 _MODAL_PREFIXES = ("can ", "may ", "should ", "must ", "will ", "could ", "would ", "might ")
@@ -179,15 +182,49 @@ def verbalize_llm(
     return sentences
 
 
+def _triplet_cache_key(triplet: Triplet, backend: str, model: Optional[str]) -> tuple:
+    return (
+        backend,
+        (model or "").strip(),
+        normalize_clause_key(triplet.head),
+        normalize_clause_key(triplet.relation),
+        normalize_clause_key(triplet.tail),
+    )
+
+
+def clear_verbalization_cache() -> None:
+    """Reset the process-level verbalization cache (for tests)."""
+    _VERBALIZATION_CACHE.clear()
+
+
 def verbalize_triplets(triplets: Iterable[Triplet], backend: str = "llm", **kwargs) -> List[str]:
     triplet_list = list(triplets)
-    if backend == "template":
-        return [verbalize_template(t) for t in triplet_list]
-    if backend == "llm":
-        return verbalize_llm(
-            triplet_list,
-            model=kwargs.get("model"),
-            llm_config=kwargs.get("llm_config"),
-            fallback_to_template=kwargs.get("fallback_to_template", True),
-        )
-    raise ValueError(f"Unsupported verbalization backend: {backend}")
+    if not triplet_list:
+        return []
+    model = kwargs.get("model")
+    results: List[Optional[str]] = [None] * len(triplet_list)
+    missing: List[int] = []
+    for index, triplet in enumerate(triplet_list):
+        key = _triplet_cache_key(triplet, backend, model)
+        cached = _VERBALIZATION_CACHE.get(key)
+        if cached is not None:
+            results[index] = cached
+        else:
+            missing.append(index)
+    if missing:
+        pending = [triplet_list[i] for i in missing]
+        if backend == "template":
+            produced = [verbalize_template(item) for item in pending]
+        elif backend == "llm":
+            produced = verbalize_llm(
+                pending,
+                model=model,
+                llm_config=kwargs.get("llm_config"),
+                fallback_to_template=kwargs.get("fallback_to_template", True),
+            )
+        else:
+            raise ValueError(f"Unsupported verbalization backend: {backend}")
+        for index, sentence in zip(missing, produced):
+            results[index] = sentence
+            _VERBALIZATION_CACHE[_triplet_cache_key(triplet_list[index], backend, model)] = sentence
+    return [sentence or "" for sentence in results]

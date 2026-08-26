@@ -30,7 +30,13 @@ from ktc.live_summarize import summarize_search_results
 from ktc.query_builder import build_queries
 from ktc.ranking import _stable_rank_order, apply_score_gate, ranking_query_from_history
 from ktc.triplet import Triplet
-from ktc.verbalization import verbalize_llm, verbalize_template, verbalize_triplets, _sanitize_llm_sentence
+from ktc.verbalization import (
+    _sanitize_llm_sentence,
+    clear_verbalization_cache,
+    verbalize_llm,
+    verbalize_template,
+    verbalize_triplets,
+)
 
 # KARE.jsonl path: env override, then repo-relative default; skip integration tests if missing.
 _DATA_ENV = os.environ.get("KARE_JSONL_PATH")
@@ -222,6 +228,9 @@ class TestFiltering(unittest.TestCase):
 
 
 class TestVerbalization(unittest.TestCase):
+    def setUp(self):
+        clear_verbalization_cache()
+
     def test_template_adds_punctuation(self):
         sentence = verbalize_template(Triplet("Cyber Cells", "are present in", "every state"))
         self.assertTrue(sentence.endswith("."))
@@ -277,6 +286,24 @@ class TestVerbalization(unittest.TestCase):
         mock_client.chat.completions.create.assert_called_once()
         call_kwargs = mock_client.chat.completions.create.call_args.kwargs
         self.assertEqual(call_kwargs["model"], "test-model")
+
+    def test_template_cache_hits_near_duplicate_triplet(self):
+        first = Triplet("Cyber Cells", "are present in", "every state")
+        near = Triplet("cyber  cells", "are present in", "every state.")
+        with mock.patch("ktc.verbalization.verbalize_template", wraps=verbalize_template) as wrapped:
+            sentences_a = verbalize_triplets([first], backend="template")
+            sentences_b = verbalize_triplets([near], backend="template")
+        self.assertEqual(sentences_a, sentences_b)
+        self.assertEqual(wrapped.call_count, 1)
+
+    @mock.patch.dict(os.environ, {}, clear=True)
+    def test_llm_backend_uses_same_cache(self):
+        triplet = Triplet("victim", "can file", "an online complaint")
+        with mock.patch("ktc.verbalization.verbalize_template", wraps=verbalize_template) as wrapped:
+            first = verbalize_triplets([triplet], backend="llm")
+            second = verbalize_triplets([triplet], backend="llm")
+        self.assertEqual(first, second)
+        self.assertEqual(wrapped.call_count, 1)
 
 
 class TestEvidenceSynthesis(unittest.TestCase):
@@ -870,6 +897,38 @@ class TestRanking(unittest.TestCase):
         result = reranker.rank_candidates_with_scores("domestic violence threat", pool, top_k=2)
         self.assertEqual(result.candidates[0].source, "live_api")
 
+    def test_tfidf_ranker_backend_returns_nonempty_without_network(self):
+        from ktc.pipeline import KnowledgeTripletPipeline
+        from ktc.ranking import TfidfRanker, get_ranker, rank_candidates
+
+        ranker = get_ranker("tfidf")
+        self.assertIsInstance(ranker, TfidfRanker)
+        pool = [
+            KnowledgeCandidate(text="A survivor can file an FIR for rape in India.", source="static_dataset"),
+            KnowledgeCandidate(text="Unrelated recipe for lentil soup.", source="static_dataset"),
+        ]
+        ranked, score = rank_candidates(
+            "I was raped and I need to file a police complaint.",
+            pool,
+            ranker=ranker,
+            min_cosine=0.0,
+        )
+        self.assertTrue(ranked)
+        self.assertIn("FIR", ranked[0].text)
+        pipeline = KnowledgeTripletPipeline(
+            verbalization_backend="template",
+            coref_backend="heuristic",
+            ranker_backend="tfidf",
+            min_cosine=0.0,
+        )
+        result = pipeline.run_hybrid(
+            "A survivor can file an FIR for rape under IPC Section 376.",
+            "agent: Hello. victim: I was raped last night and I need help.",
+            enable_live=False,
+        )
+        self.assertTrue(result.verbalized or result.supplemental_counseling)
+        self.assertIsInstance(pipeline.ranker, TfidfRanker)
+
 
 class TestLiveConfig(unittest.TestCase):
     def test_trusted_domains_lowercased_at_load(self):
@@ -888,6 +947,27 @@ class TestLiveConfig(unittest.TestCase):
         self.assertTrue(budget.can_call())
         budget.record(1)
         budget.record(1)
+        self.assertFalse(budget.can_call())
+
+    def test_per_dialogue_budget_isolates_dialogues(self):
+        budget = ApiCallBudget(10, per_dialogue_limit=2)
+        budget.set_dialogue("dlg-a")
+        self.assertTrue(budget.record(1))
+        self.assertTrue(budget.record(1))
+        self.assertFalse(budget.can_call())
+        self.assertFalse(budget.record(1))
+        budget.set_dialogue("dlg-b")
+        self.assertTrue(budget.can_call())
+        self.assertTrue(budget.record(1))
+        self.assertEqual(budget.used, 3)
+
+    def test_per_dialogue_budget_none_keeps_global_only(self):
+        budget = ApiCallBudget(2, per_dialogue_limit=None)
+        budget.set_dialogue("dlg-a")
+        budget.record(1)
+        budget.record(1)
+        self.assertFalse(budget.can_call())
+        budget.set_dialogue("dlg-b")
         self.assertFalse(budget.can_call())
 
     def test_loaded_live_timeouts(self):
@@ -1544,6 +1624,62 @@ class TestEntityExtraction(unittest.TestCase):
         texts = {e["text"].lower() for e in entities}
         self.assertIn("stalking", texts)
         self.assertIn("instagram", texts)
+        lexicon = [e for e in entities if e.get("source") == "lexicon"]
+        self.assertTrue(any(e["text"].lower() == "stalking" for e in lexicon))
+
+    def test_lexicon_hits_keep_source_lexicon(self):
+        entities = extract_entities("I was raped last night.")
+        rape = next(e for e in entities if e["text"].lower() == "rape")
+        self.assertEqual(rape.get("source"), "lexicon")
+        self.assertEqual(rape.get("category"), CATEGORY_CRIME)
+
+    def test_history_fallback_recovers_earlier_crime_entity(self):
+        from ktc.pipeline import KnowledgeTripletPipeline
+
+        history = (
+            "agent: Hello. victim: I was raped last night by a neighbour. "
+            "agent: I am sorry to hear that. victim: Yes, I know that person. "
+            "agent: Please stay on the line. victim: Okay then."
+        )
+        pipeline = KnowledgeTripletPipeline(
+            verbalization_backend="template",
+            coref_backend="heuristic",
+            ranker=TestPipelineIntegration()._passthrough_ranker(),
+        )
+        result = pipeline.run_hybrid(
+            "A survivor can file an FIR under IPC Section 376.",
+            history,
+            enable_live=False,
+        )
+        self.assertFalse(
+            any(
+                item.get("text", "").lower() == "rape" and item.get("source") == "lexicon"
+                for item in extract_entities("Yes, I know that person. Okay then.")
+            )
+        )
+        texts = {item["text"].lower() for item in result.entities}
+        self.assertIn("rape", texts)
+
+    def test_spacy_ner_secondary_pass_tags_source(self):
+        entities = extract_entities(
+            "I spoke with Inspector Sharma at Delhi Police Headquarters yesterday."
+        )
+        ner = [e for e in entities if e.get("source") == "spacy_ner"]
+        self.assertTrue(ner, msg=entities)
+        self.assertTrue(all("category" in e for e in ner))
+
+    def test_noun_chunk_fallback_when_ner_empty(self):
+        entities = extract_entities("The wooden garden bench collapsed during the storm.")
+        sources = {e.get("source") for e in entities}
+        self.assertTrue(
+            "noun_chunk" in sources or "spacy_ner" in sources or sources == {"lexicon"},
+            msg=entities,
+        )
+        if "noun_chunk" in sources:
+            chunks = [e for e in entities if e.get("source") == "noun_chunk"]
+            self.assertTrue(all(len(e["text"].split()) > 1 for e in chunks))
+            self.assertTrue(all(e.get("category") is None for e in chunks))
+
 
     def test_queries_are_specific(self):
         entities = [{"text": "stalking", "category": CATEGORY_CRIME}]
@@ -2587,6 +2723,112 @@ class TestCaseMemoryAndSituationGaps(unittest.TestCase):
             self.assertNotIn(text, turn2_queries)
         self.assertTrue(any("whatsapp" in text.lower() for text in turn2_queries), msg=turn2_queries)
         self.assertTrue(issued_after_turn1 <= memory.queries_issued)
+
+
+class TestFunnelAggregate(unittest.TestCase):
+    def test_accumulate_turn_counts_no_passages_and_sources(self):
+        from types import SimpleNamespace
+
+        from scripts.aggregate_funnel_report import accumulate_turn, summarize
+
+        stats = {
+            "total_turns": 0,
+            "no_passages_used": 0,
+            "gate_passed": [],
+            "final_verbalized_count": [],
+            "sources": {},
+        }
+        accumulate_turn(
+            stats,
+            SimpleNamespace(
+                no_passages_used=True,
+                knowledge_funnel={"gate_passed": 0, "final_verbalized_count": 0},
+                final_knowledge_sources=["concatenation_fallback"],
+            ),
+        )
+        accumulate_turn(
+            stats,
+            SimpleNamespace(
+                no_passages_used=False,
+                knowledge_funnel={"gate_passed": 4, "final_verbalized_count": 3},
+                final_knowledge_sources=["verbalized"],
+            ),
+        )
+        summary = summarize(stats)
+        self.assertEqual(summary["total_turns"], 2)
+        self.assertEqual(summary["no_passages_used"], 1)
+        self.assertEqual(summary["no_passages_used_pct"], 50.0)
+        self.assertEqual(summary["gate_passed"]["min"], 0)
+        self.assertEqual(summary["gate_passed"]["max"], 4)
+        self.assertEqual(summary["final_knowledge_sources"]["concatenation_fallback"], 1)
+        self.assertEqual(summary["final_knowledge_sources"]["verbalized"], 1)
+
+
+class TestCleaningHeuristics(unittest.TestCase):
+    def test_strips_email_phone_and_glued_tokens_not_in_boilerplate(self):
+        from ktc.cleaning import _BOILERPLATE, clean_knowledge_text
+
+        messy = (
+            "A survivor can file an FIR at the nearest police station. "
+            "Contact psychiatricinfo@gmail.comMore about counseling services "
+            "for survivors of domestic violence in India. "
+            "Call 011-23456789 immediately if you need emergency legal assistance."
+        )
+        for phrase in _BOILERPLATE:
+            self.assertNotIn(phrase.lower(), messy.lower())
+        cleaned = clean_knowledge_text(messy)
+        self.assertNotIn("@", cleaned)
+        self.assertNotIn("011-23456789", cleaned)
+        self.assertNotIn("gmail.comMore", cleaned)
+        self.assertIn("survivor can file an FIR", cleaned)
+        self.assertIn("emergency legal assistance", cleaned)
+
+    def test_keeps_known_boilerplate_pass(self):
+        from ktc.cleaning import clean_knowledge_text
+
+        text = (
+            "Victims can lodge a complaint at the police station. "
+            "you must be logged in to post a comment Extra filler so this stays long enough."
+        )
+        cleaned = clean_knowledge_text(text)
+        self.assertNotIn("logged in to post a comment", cleaned.lower())
+        self.assertIn("lodge a complaint", cleaned.lower())
+
+
+class TestCategorySmoke(unittest.TestCase):
+    def test_one_dialogue_per_paper_category_has_final_knowledge(self):
+        if not DATA_PATH.exists():
+            self.skipTest("KARE.jsonl not available")
+        from scripts.smoke_test_by_category import PAPER_CRIME_CATEGORIES, run_category_smoke
+        from ktc.pipeline import KnowledgeTripletPipeline
+        from ktc.ranking import CandidateRankingResult
+
+        class _Ranker:
+            model = None
+
+            def cosine_to_query(self, query, texts):
+                return [0.9] * len(list(texts))
+
+            def rank_candidates_with_scores(self, dialog_history, candidates, top_k=26):
+                cl = list(candidates)
+                scores = [0.9] * len(cl)
+                sliced = cl[:top_k]
+                scored = scores[:top_k]
+                return CandidateRankingResult(sliced, scored, scored[0] if scored else 0.0)
+
+        pipeline = KnowledgeTripletPipeline(
+            verbalization_backend="template",
+            coref_backend="heuristic",
+            ranker=_Ranker(),
+        )
+        summary = run_category_smoke(DATA_PATH, pipeline=pipeline)
+        for line in summary["failures"]:
+            print(line)
+        self.assertTrue(
+            summary["ok"],
+            msg="category smoke failures: " + " | ".join(summary["failures"]),
+        )
+        self.assertEqual(set(summary["results"]), set(PAPER_CRIME_CATEGORIES))
 
 
 if __name__ == "__main__":

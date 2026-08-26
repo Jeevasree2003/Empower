@@ -10,6 +10,7 @@ MONTHS = (
     "September|October|November|December"
 )
 
+# Observed junk phrases from earlier scrapes — supplementary, not the primary defense.
 _BOILERPLATE = (
     "you must be logged in to post a comment",
     "The Legal Team of Online Legal India",
@@ -23,6 +24,18 @@ _BOILERPLATE = (
     "filing consumer complaint against Mental Harassment",
 )
 
+_EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w.-]+\.\w+\b")
+_PHONE_FRAGMENT_RE = re.compile(r"\b\d{2,4}[-\s]\d{4,8}\b")
+# 25+ chars with no whitespace; mixed-case transitions are split in the callback.
+_GLUED_TOKEN_RE = re.compile(r"[A-Za-z0-9@.]{25,}")
+
+
+def _split_glued_token(match: re.Match) -> str:
+    token = match.group(0)
+    if not (re.search(r"[a-z]", token) and re.search(r"[A-Z]", token)):
+        return token
+    return re.sub(r"([a-z])([A-Z])", r"\1 \2", token)
+
 
 def clean_knowledge_text(text: str) -> str:
     """Segment and de-noise raw scraped knowledge before triplet extraction."""
@@ -31,6 +44,11 @@ def clean_knowledge_text(text: str) -> str:
 
     # Passage tags used in KARE-Sample.json
     text = re.sub(r"<K\d+>", "\n", text)
+
+    # Pattern-based junk (primary defense for unseen scrape sites).
+    text = _EMAIL_RE.sub(" ", text)
+    text = _PHONE_FRAGMENT_RE.sub(" ", text)
+    text = _GLUED_TOKEN_RE.sub(_split_glued_token, text)
 
     # Month D, YYYY  (e.g. September 5, 2022)
     text = re.sub(
