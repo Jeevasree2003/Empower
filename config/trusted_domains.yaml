@@ -4,6 +4,7 @@
 
 government_legal:
   - indiacode.nic.in
+  - indiankanoon.org
   - ncw.nic.in
   - cybercrime.gov.in
   - mha.gov.in
@@ -15,6 +16,7 @@ health_medical:
   - who.int
   - nimhans.ac.in
   - mohfw.gov.in
+  - dghs.mohfw.gov.in
 
 ngo_support:
   - vandrevalafoundation.com

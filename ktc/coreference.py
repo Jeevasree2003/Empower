@@ -52,7 +52,29 @@ _MASCULINE_HINTS = frozenset(
 )
 
 # How many preceding sentences the heuristic searches (same sentence always first).
+# Pronoun-only intermediate sentences are skipped and do not consume this budget
+# as a successful match.
 MAX_ANTECEDENT_LOOKBACK = 3
+# Skip heuristic substitution on long scraped blobs; filters drop unresolved pronouns.
+MAX_HEURISTIC_SENTENCES = 8
+MAX_HEURISTIC_CHARS = 1600
+_VAGUE_ANTECEDENT_HEADS = frozenset(
+    {
+        "matter",
+        "deal",
+        "thing",
+        "things",
+        "stuff",
+        "lot",
+        "bit",
+        "one",
+        "fact",
+        "situation",
+        "way",
+        "point",
+        "issue",
+    }
+)
 
 
 def _sentences(text: str, nlp) -> List:
@@ -113,7 +135,28 @@ def _find_source_sentence(triplet: Triplet, sent_docs: Sequence) -> Optional[obj
     return best_doc if best_overlap > 0 else None
 
 
+def _is_vague_antecedent(chunk) -> bool:
+    words = re.findall(r"[a-z']+", chunk.text.strip().lower())
+    if not words:
+        return True
+    head = words[-1]
+    return head in _VAGUE_ANTECEDENT_HEADS
+
+
+def _usable_antecedent(chunk, pronoun_class: str) -> bool:
+    """Reject pronouns (including NOUN mis-tags), vague NPs, and number mismatches."""
+    if _is_pronoun_chunk(chunk):
+        return False
+    if getattr(chunk.root, "pos_", None) == "PRON":
+        return False
+    if _is_vague_antecedent(chunk):
+        return False
+    return _chunk_compatible(chunk, pronoun_class)
+
+
 def _chunk_compatible(chunk, pronoun_class: str) -> bool:
+    if _is_pronoun_chunk(chunk) or getattr(chunk.root, "pos_", None) == "PRON":
+        return False
     text_lower = chunk.text.lower()
     tokens = set(re.findall(r"[a-z']+", text_lower))
 
@@ -132,11 +175,16 @@ def _chunk_compatible(chunk, pronoun_class: str) -> bool:
         return chunk.root.pos_ in {"NOUN", "PROPN"}
 
     if pronoun_class == "plural":
-        if chunk.root.morph.get("Number") == ["Plur"]:
+        number = chunk.root.morph.get("Number")
+        if number == ["Sing"]:
+            return False
+        if number == ["Plur"]:
             return True
-        if any(t.text.endswith("s") and t.pos_ in {"NOUN", "PROPN"} for t in chunk):
+        tags = [getattr(t, "tag_", "") for t in chunk]
+        if any(tag in {"NNS", "NNPS"} for tag in tags):
             return True
-        return chunk.root.pos_ in {"NOUN", "PROPN"}
+        # Do not accept a bare singular noun (they → law, we → the matter).
+        return False
 
     # neuter: prefer non-person referents
     if chunk.root.ent_type_ == "PERSON":
@@ -164,23 +212,23 @@ def _collect_candidates(sent_doc, before_char: Optional[int] = None) -> List:
 
 
 def _pick_from_compatible(compatible: List, pronoun_class: str) -> Optional[str]:
-    if not compatible:
+    usable = [c for c in compatible if _usable_antecedent(c, pronoun_class)]
+    if not usable:
         return None
     if pronoun_class in {"masc", "fem"}:
         # Prefer nearest preceding PERSON/PROPN; require one for gendered pronouns
         # when multiple candidates exist (reduces wrong substitutions).
         person_chunks = [
             c
-            for c in reversed(compatible)
-            if not _is_pronoun_chunk(c)
-            and (c.root.ent_type_ == "PERSON" or c.root.pos_ == "PROPN")
+            for c in reversed(usable)
+            if c.root.ent_type_ == "PERSON" or c.root.pos_ == "PROPN"
         ]
         if person_chunks:
             return person_chunks[0].text.strip()
-        if len(compatible) == 1 and not _is_pronoun_chunk(compatible[0]):
-            return compatible[0].text.strip()
+        if len(usable) == 1:
+            return usable[0].text.strip()
         return None
-    return compatible[-1].text.strip()
+    return usable[-1].text.strip()
 
 
 def _pick_antecedent(
@@ -195,7 +243,7 @@ def _pick_antecedent(
 
     same_sent = _collect_candidates(current, before_char=pronoun_char)
     if same_sent:
-        compatible = [c for c in same_sent if _chunk_compatible(c, pronoun_class)]
+        compatible = [c for c in same_sent if _usable_antecedent(c, pronoun_class)]
         chosen = _pick_from_compatible(compatible, pronoun_class)
         if chosen:
             return chosen
@@ -205,19 +253,13 @@ def _pick_antecedent(
         if prev_idx < 0:
             break
         prev_candidates = _collect_candidates(sent_docs[prev_idx])
-        compatible = [c for c in prev_candidates if _chunk_compatible(c, pronoun_class)]
+        compatible = [c for c in prev_candidates if _usable_antecedent(c, pronoun_class)]
         if not compatible:
+            # Pronoun-only / incompatible sentence: keep looking further back.
             continue
-        if pronoun_class in {"masc", "fem"}:
-            for chunk in reversed(compatible):
-                if _is_pronoun_chunk(chunk):
-                    continue
-                if chunk.root.ent_type_ == "PERSON" or chunk.root.pos_ == "PROPN":
-                    return chunk.text.strip()
-            if len(compatible) == 1 and not _is_pronoun_chunk(compatible[0]):
-                return compatible[0].text.strip()
-            continue
-        return compatible[-1].text.strip()
+        chosen = _pick_from_compatible(compatible, pronoun_class)
+        if chosen:
+            return chosen
     return None
 
 
@@ -246,7 +288,13 @@ def _resolve_heuristic(
     nlp,
     max_lookback: int = MAX_ANTECEDENT_LOOKBACK,
 ) -> List[Triplet]:
+    if len(knowledge_text) > MAX_HEURISTIC_CHARS:
+        return list(triplets)
+
     sent_docs = _sentences(knowledge_text, nlp)
+    if len(sent_docs) > MAX_HEURISTIC_SENTENCES:
+        return list(triplets)
+
     resolved: List[Triplet] = []
 
     for triplet in triplets:

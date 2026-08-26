@@ -51,7 +51,7 @@ def _np_core_span(token) -> str:
 def _noun_prep_pobjs(token) -> List[tuple]:
     pairs: List[tuple] = []
     for child in token.children:
-        if child.dep_ != "prep":
+        if child.dep_ != "prep" or not _is_locative_prep(child):
             continue
         for pobj in child.children:
             if pobj.dep_ == "pobj":
@@ -86,10 +86,22 @@ _RELATIVE_PRONOUNS = frozenset({"who", "which", "that", "whom", "whose"})
 
 
 def _coordination_root(verb_token):
-    """Return the head verb in a coordinated verb phrase chain."""
+    """Return the head verb in a coordinated verb phrase chain.
+
+    Walk past conjunct heads even when spaCy tags the first predicate as NOUN
+    (e.g. ``investigates`` in ``Cyber Cell investigates cases and prosecutes ...``).
+    """
     head = verb_token
-    while head.dep_ == "conj" and head.head.pos_ in {"VERB", "AUX"}:
-        head = head.head
+    seen = set()
+    while head.dep_ == "conj" and id(head) not in seen:
+        seen.add(id(head))
+        parent = head.head
+        if parent is head:
+            break
+        if _is_clause_verb(parent) or parent.dep_ in {"ROOT", "conj"}:
+            head = parent
+            continue
+        break
     return head
 
 
@@ -112,6 +124,26 @@ def _subjects_for_verb(verb_token, inherit_conj: bool = True) -> List:
 
 
 _CORE_OBJ_DEPS = frozenset({"dobj", "obj", "attr", "dative", "oprd", "acomp", "xcomp"})
+_VERB_TAGS = frozenset({"VB", "VBD", "VBG", "VBN", "VBP", "VBZ", "MD"})
+_CLAUSE_DEPS = frozenset({"ROOT", "conj", "ccomp", "xcomp", "advcl", "relcl", "acl"})
+_SUBJ_OR_OBJ_DEPS = frozenset({"nsubj", "nsubjpass", "csubj", "dobj", "obj", "attr"})
+# Extra (verb, prep, pobj) triples only for locative/oblique location — not "to face" junk.
+_LOCATIVE_PREPS = frozenset(
+    {"at", "in", "on", "into", "onto", "from", "near", "inside", "outside", "within", "upon"}
+)
+
+
+def _is_clause_verb(token) -> bool:
+    """True for verbs, including finite verbs spaCy mis-tags as nouns."""
+    if token.pos_ in {"VERB", "AUX"}:
+        return True
+    if token.tag_ in _VERB_TAGS:
+        return True
+    if token.dep_ not in _CLAUSE_DEPS:
+        return False
+    if token.pos_ not in {"NOUN", "PROPN", "ADJ"}:
+        return False
+    return any(child.dep_ in _SUBJ_OR_OBJ_DEPS for child in token.children)
 
 
 def _core_objects_for_verb(verb_token) -> List:
@@ -126,11 +158,15 @@ def _core_objects_for_verb(verb_token) -> List:
     return objects
 
 
+def _is_locative_prep(prep_token) -> bool:
+    return prep_token.text.lower() in _LOCATIVE_PREPS
+
+
 def _prep_pobjs_for_verb(verb_token) -> List[tuple]:
-    """Return ``(prep_token, pobj_token)`` pairs attached to *verb_token*."""
+    """Return locative ``(prep_token, pobj_token)`` pairs attached to *verb_token*."""
     pairs: List[tuple] = []
     for child in verb_token.children:
-        if child.dep_ != "prep":
+        if child.dep_ != "prep" or not _is_locative_prep(child):
             continue
         for pobj in child.children:
             if pobj.dep_ == "pobj":
@@ -203,7 +239,7 @@ def _extract_with_spacy(sentence: str, nlp) -> List[Triplet]:
     triplets: List[Triplet] = []
 
     for token in doc:
-        if token.pos_ not in {"VERB", "AUX"}:
+        if not _is_clause_verb(token):
             continue
         # Skip auxiliary tokens attached to another verb (e.g. "can" in "can approach").
         if token.dep_ in {"aux", "auxpass"}:

@@ -6,3 +6,6 @@ data/
 *.egg-info/
 .eggs/
 .env
+KARE-data/
+.venv/
+.env
