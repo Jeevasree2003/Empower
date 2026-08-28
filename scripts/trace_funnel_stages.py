@@ -27,8 +27,10 @@ if str(ROOT) not in sys.path:
 
 from ktc.entity_extraction import extract_entities, has_confident_entities  # noqa: E402
 from ktc.knowledge_item import KnowledgeCandidate  # noqa: E402
+from ktc.live_config import LiveRetrievalConfig  # noqa: E402
 from ktc.live_knowledge import victim_utterances_from_history  # noqa: E402
 from ktc.live_summarize import is_scraped_boilerplate  # noqa: E402
+from ktc.passages import DEFAULT_PASSAGE_MIN_SCORE, DEFAULT_PASSAGE_TOP_N  # noqa: E402
 from ktc.pipeline import KnowledgeTripletPipeline  # noqa: E402
 from ktc.ranking import MIN_COSINE, apply_score_gate  # noqa: E402
 from ktc.reply_knowledge import _ANECDOTE, _NOT_VICTIM_FACING  # noqa: E402
@@ -170,6 +172,7 @@ def trace_turn(
     category: str,
     knowledge_text: str,
     history: str,
+    enable_live: bool = False,
 ) -> Dict[str, Any]:
     _CAPTURE.clear()
     victim_turns = victim_utterances_from_history(history)
@@ -180,7 +183,7 @@ def trace_turn(
     result = pipeline.run_hybrid(
         knowledge_text,
         history,
-        enable_live=False,
+        enable_live=enable_live,
         dialogue_id=str(dialogue_id),
         turn=turn_id,
     )
@@ -204,6 +207,8 @@ def trace_turn(
             "reject_reason": (per_candidate[0].get("reject_reason") if per_candidate else None),
         }
 
+    live_pool = [c for c in pool if c.source in {"live_api", "live_sentence_direct"}]
+    static_pool = [c for c in pool if c.source == "static_dataset"]
     funnel = result.knowledge_funnel or {}
     sources = list(result.final_knowledge_sources or [])
     record = {
@@ -219,6 +224,8 @@ def trace_turn(
         "passages_used_count": len(result.passages_used or []),
         "static_triplets": int(funnel.get("static_triplets") or 0),
         "candidates_retrieved": len(pool),
+        "static_candidates_retrieved": len(static_pool),
+        "live_candidates_retrieved": len(live_pool),
         "candidates_retrieved_preview": [_preview_candidate(c) for c in pool[:5]],
         "candidates_after_ranking": len(ranked_pairs),
         "candidates_after_ranking_top5_scores": top5,
@@ -231,8 +238,14 @@ def trace_turn(
         "top1_similarity_score": round(float(result.top1_similarity_score or 0.0), 4),
         "top_ranked": top_ranked,
         "final_knowledge_sources": sources,
+        "final_knowledge_text": (result.final_knowledge_text or "")[:400],
         "counseling_bank_used": int(result.counseling_bank_used or 0),
         "final_verbalized_count": int(funnel.get("final_verbalized_count") or 0),
+        "live_enabled": bool(result.live_enabled),
+        "live_sentences": int(funnel.get("live_sentences") or 0),
+        "live_triplets": int(funnel.get("live_triplets") or 0),
+        "live_sentence_relevance": int(funnel.get("live_sentence_relevance") or 0),
+        "live_sentences_used_directly": int(funnel.get("live_sentences_used_directly") or 0),
     }
     return record
 
@@ -495,6 +508,26 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output_dir", type=Path, default=Path("reports"))
     parser.add_argument("--empty-n", type=int, default=20, dest="empty_n")
+    parser.add_argument(
+        "--passage-top-n",
+        type=int,
+        default=DEFAULT_PASSAGE_TOP_N,
+        help="Passage window cap (production default 3). Does not change candidate min_cosine.",
+    )
+    parser.add_argument(
+        "--passage-min-score",
+        type=float,
+        default=DEFAULT_PASSAGE_MIN_SCORE,
+        help="Passage cosine floor, independent of candidate gate (production default 0.38).",
+    )
+    parser.add_argument(
+        "--enable-live",
+        action="store_true",
+        default=False,
+        help="Opt in to live retrieval for this diagnostic run only.",
+    )
+    parser.add_argument("--tag", default="", help="Optional filename tag for the jsonl/md outputs.")
+    parser.add_argument("--no-md", action="store_true", help="Skip writing the generic diagnosis markdown.")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s %(message)s")
@@ -509,9 +542,15 @@ def main() -> None:
         raise SystemExit(f"only {len(shuffled)} turns available, need --n {args.n}")
 
     _install_rank_tracer()
+    live_config = LiveRetrievalConfig.load()
+    if args.enable_live:
+        live_config.max_api_calls_per_run = max(int(live_config.max_api_calls_per_run), 500)
     pipeline = KnowledgeTripletPipeline(
         verbalization_backend="template",
         coref_backend="heuristic",
+        passage_top_n=int(args.passage_top_n),
+        passage_min_score=float(args.passage_min_score),
+        live_config=live_config,
     )
 
     sample_specs = shuffled[: args.n]
@@ -519,12 +558,13 @@ def main() -> None:
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    trace_path = args.output_dir / f"trace_{stamp}.jsonl"
+    tag = f"_{args.tag}" if args.tag else ""
+    trace_path = args.output_dir / f"trace{tag}_{stamp}.jsonl"
 
     sample_records: List[Dict[str, Any]] = []
     with trace_path.open("w", encoding="utf-8") as handle:
         for spec in sample_specs:
-            record = trace_turn(pipeline, **spec)
+            record = trace_turn(pipeline, enable_live=args.enable_live, **spec)
             sample_records.append(record)
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
@@ -533,46 +573,56 @@ def main() -> None:
     ]
     empty: List[Dict[str, Any]] = [r for r in sample_records if empty_bucket_kind(r) == "empty"]
     extra_records: List[Dict[str, Any]] = []
-    for spec in rest:
-        if len(counseling) >= args.empty_n and len(empty) >= args.empty_n:
-            break
-        record = trace_turn(pipeline, **spec)
-        extra_records.append(record)
-        kind = empty_bucket_kind(record)
-        if kind == "supplemental_counseling" and len(counseling) < args.empty_n:
-            counseling.append(record)
-        elif kind == "empty" and len(empty) < args.empty_n:
-            empty.append(record)
-    counseling = counseling[: args.empty_n]
-    empty = empty[: args.empty_n]
+    if args.empty_n > 0:
+        for spec in rest:
+            if len(counseling) >= args.empty_n and len(empty) >= args.empty_n:
+                break
+            record = trace_turn(pipeline, enable_live=args.enable_live, **spec)
+            extra_records.append(record)
+            kind = empty_bucket_kind(record)
+            if kind == "supplemental_counseling" and len(counseling) < args.empty_n:
+                counseling.append(record)
+            elif kind == "empty" and len(empty) < args.empty_n:
+                empty.append(record)
+        counseling = counseling[: args.empty_n]
+        empty = empty[: args.empty_n]
 
     rows = crosstab(sample_records)
     table = format_crosstab(rows)
     print("=== Cross-tab gate pass rate by entity source / history fallback ===")
     print(table)
-    print()
-    print(f"=== {len(counseling)} supplemental_counseling-only turns ===")
-    for rec in counseling:
-        print(format_empty_case(rec))
-    print()
-    print(f"=== {len(empty)} fully empty turns ===")
-    for rec in empty:
-        print(format_empty_case(rec))
-
-    md_path = args.output_dir / f"gate_diagnosis_{stamp}.md"
-    md = write_diagnosis_md(
-        md_path,
-        n_sample=args.n,
-        seed=args.seed,
-        crosstab_rows=rows,
-        sample_records=sample_records,
-        counseling_cases=counseling,
-        empty_cases=empty,
+    print(f"passage_top_n={args.passage_top_n} passage_min_score={args.passage_min_score} enable_live={args.enable_live}")
+    print(
+        "gate_passed mean="
+        f"{(sum(int(r.get('funnel_gate_passed') or 0) for r in sample_records) / max(len(sample_records), 1)):.3f}"
     )
+    zero_static = sum(1 for r in sample_records if int(r.get("static_candidates_retrieved") or r.get("candidates_retrieved") or 0) == 0)
+    print(f"zero static candidates retrieved={zero_static}")
     print()
-    print(md)
+    if args.empty_n > 0:
+        print(f"=== {len(counseling)} supplemental_counseling-only turns ===")
+        for rec in counseling:
+            print(format_empty_case(rec))
+        print()
+        print(f"=== {len(empty)} fully empty turns ===")
+        for rec in empty:
+            print(format_empty_case(rec))
+
+    if not args.no_md:
+        md_path = args.output_dir / f"gate_diagnosis{tag}_{stamp}.md"
+        md = write_diagnosis_md(
+            md_path,
+            n_sample=args.n,
+            seed=args.seed,
+            crosstab_rows=rows,
+            sample_records=sample_records,
+            counseling_cases=counseling,
+            empty_cases=empty,
+        )
+        print()
+        print(md)
+        print(f"wrote {md_path}")
     print(f"wrote {trace_path}")
-    print(f"wrote {md_path}")
 
 
 if __name__ == "__main__":

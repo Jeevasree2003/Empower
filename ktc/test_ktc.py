@@ -551,6 +551,7 @@ class TestEvidenceSynthesis(unittest.TestCase):
             coref_backend="heuristic",
             ranker=_PassthroughRanker(),
             min_cosine=0.0,
+            passage_min_score=0.0,
         )
         result = pipeline.run_hybrid(
             "Victims can file a complaint online.",
@@ -604,6 +605,7 @@ class TestEvidenceSynthesis(unittest.TestCase):
             coref_backend="heuristic",
             ranker=_PassthroughRanker(),
             min_cosine=0.0,
+            passage_min_score=0.0,
         )
 
     @mock.patch("ktc.pipeline.synthesize_evidence")
@@ -808,6 +810,41 @@ class TestRanking(unittest.TestCase):
         second = select_relevant_passages(facts, "women helpline support", ranker, min_cosine=0.0)
         self.assertEqual(model.encode.call_count, first_calls)
         self.assertEqual(len(first), len(second))
+
+    def test_passage_top_n_and_min_score_are_independent(self):
+        from ktc.passages import select_relevant_passages
+        from ktc.ranking import clear_text_embedding_cache
+
+        clear_text_embedding_cache()
+        query = "need FIR police complaint help"
+        windows = [
+            "A survivor can file an FIR at the nearest police station in India today.",
+            "Legal aid desks at district courts can help a survivor draft a complaint.",
+            "Cybercrime.gov.in accepts online complaints for stalking and harassment.",
+            "Counselors at KIRAN 1800-599-0019 offer 24x7 mental health support.",
+            "A Kannada couple shared a recipe for festival sweets last weekend.",
+        ]
+        vectors = {
+            query: np.array([1.0, 0.0], dtype=float),
+            windows[0]: np.array([0.90, 0.0], dtype=float),
+            windows[1]: np.array([0.50, 0.0], dtype=float),
+            windows[2]: np.array([0.42, 0.0], dtype=float),
+            windows[3]: np.array([0.20, 0.0], dtype=float),
+            windows[4]: np.array([0.05, 0.0], dtype=float),
+        }
+
+        def encode(texts, **kwargs):
+            return np.stack([vectors[text] for text in texts])
+
+        ranker = mock.Mock(model=mock.Mock(encode=encode))
+        top3 = select_relevant_passages(windows, query, ranker, top_n=3, min_score=0.15)
+        top5 = select_relevant_passages(windows, query, ranker, top_n=5, min_score=0.15)
+        gated = select_relevant_passages(windows, query, ranker, top_n=5, min_score=0.38)
+        self.assertEqual(len(top3), 3)
+        self.assertEqual(len(top5), 4)
+        self.assertEqual(len(gated), 3)
+        self.assertTrue(all(score >= 0.15 for _text, score in top5))
+        self.assertTrue(all(score >= 0.38 for _text, score in gated))
 
     def test_ranking_query_ignores_bot_greeting(self):
         history = "agent: Greetings from Rakshak. user: my husband threatened to murder me."

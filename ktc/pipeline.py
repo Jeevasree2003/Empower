@@ -28,7 +28,12 @@ from ktc.live_knowledge import (
     static_candidates_from_triplets,
     victim_utterances_from_history,
 )
-from ktc.passages import select_dual_domain_passages, split_knowledge_passages
+from ktc.passages import (
+    DEFAULT_PASSAGE_MIN_SCORE,
+    DEFAULT_PASSAGE_TOP_N,
+    select_dual_domain_passages,
+    split_knowledge_passages,
+)
 from ktc.query_builder import (
     SearchQuery,
     _TEMPLATE_PRIORITY,
@@ -249,7 +254,8 @@ class KnowledgeTripletPipeline:
 
     top_k: int = MAX_RANKED
     min_cosine: float = MIN_COSINE
-    passage_top_n: int = 3
+    passage_top_n: int = DEFAULT_PASSAGE_TOP_N
+    passage_min_score: float = DEFAULT_PASSAGE_MIN_SCORE
     openie_backend: str = "spacy"
     coref_backend: str = "heuristic"
     verbalization_backend: str = "llm"
@@ -309,7 +315,7 @@ class KnowledgeTripletPipeline:
                 query,
                 self._get_ranker(),
                 top_n=self.passage_top_n,
-                min_cosine=self.min_cosine,
+                min_score=self.passage_min_score,
                 include_legal=DOMAIN_LEGAL in search_domains,
                 include_clinical=DOMAIN_CLINICAL in search_domains or True,
             )
@@ -416,7 +422,7 @@ class KnowledgeTripletPipeline:
             query,
             ranker,
             top_n=self.passage_top_n,
-            min_cosine=self.min_cosine,
+            min_score=self.passage_min_score,
             include_legal=DOMAIN_LEGAL in search_domains,
             include_clinical=True,
         )
