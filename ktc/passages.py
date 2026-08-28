@@ -12,6 +12,8 @@ _K_SPLIT = re.compile(r"<K\d+>", re.IGNORECASE)
 
 # Keep at most this many knowledge passages for OpenIE.
 DEFAULT_PASSAGE_TOP_N = 3
+# Independent of the candidate-level cosine gate; production default stays 0.38.
+DEFAULT_PASSAGE_MIN_SCORE = 0.38
 
 
 def split_knowledge_passages(raw_text: str) -> List[str]:
@@ -58,9 +60,15 @@ def select_relevant_passages(
     query: str,
     ranker,
     top_n: int = DEFAULT_PASSAGE_TOP_N,
-    min_cosine: float = 0.38,
+    min_score: float = DEFAULT_PASSAGE_MIN_SCORE,
+    min_cosine: float | None = None,
 ) -> List[Tuple[str, float]]:
-    """Return ``(passage, score)`` for the top passages at or above *min_cosine*."""
+    """Return ``(passage, score)`` for the top ``top_n`` windows at or above ``min_score``.
+
+    ``top_n`` and ``min_score`` are independent: extra windows are kept only if they
+    clear the floor. ``min_cosine`` is a backward-compatible alias for ``min_score``.
+    """
+    floor = float(min_score) if min_cosine is None else float(min_cosine)
     if not query.strip() or not passages:
         return []
     usable = [p for p in passages if not _is_junk_passage(p)]
@@ -80,7 +88,7 @@ def select_relevant_passages(
     selected: List[Tuple[str, float]] = []
     for idx in order:
         score = float(scores[idx])
-        if score < min_cosine:
+        if score < floor:
             continue
         selected.append((usable[int(idx)], score))
         if len(selected) >= top_n:
@@ -93,13 +101,15 @@ def select_dual_domain_passages(
     base_query: str,
     ranker,
     top_n: int = DEFAULT_PASSAGE_TOP_N,
-    min_cosine: float = 0.38,
+    min_score: float = DEFAULT_PASSAGE_MIN_SCORE,
+    min_cosine: float | None = None,
     include_legal: bool = False,
     include_clinical: bool = True,
 ) -> List[Tuple[str, float]]:
     """Score passages against the user need; only expand legal when the turn is legal."""
     if not base_query.strip():
         return []
+    floor = float(min_score) if min_cosine is None else float(min_cosine)
     queries = [base_query]
     if include_clinical:
         queries.append(f"{base_query} mental health counseling crisis helpline safety")
@@ -109,7 +119,7 @@ def select_dual_domain_passages(
     seen = set()
     for query in queries:
         for passage, score in select_relevant_passages(
-            passages, query, ranker, top_n=top_n, min_cosine=min_cosine
+            passages, query, ranker, top_n=top_n, min_score=floor
         ):
             key = passage[:200]
             if key in seen:
