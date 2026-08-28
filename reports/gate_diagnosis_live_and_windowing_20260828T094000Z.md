@@ -10,25 +10,26 @@ Configs on the identical sample:
 | Part 1 windowing | **5** | 0.38 | off | `reports/trace_topn5_static_20260828T093614Z.jsonl` |
 | Part 2 live | 3 | 0.38 | **on** | `reports/trace_live_topn3_20260828T093713Z.jsonl` |
 | both | **5** | 0.38 | **on** | `reports/trace_live_topn5_20260828T093911Z.jsonl` |
+| Part 3 floor | **5** | **0.15** | off | `reports/trace_floor015_topn5_static_20260828T095151Z.jsonl` |
 
 ## Side-by-side (identical 50 turns)
 
-| metric | static top_n=3 | static top_n=5 | static+live top_n=3 | live+top_n=5 |
-|---|---:|---:|---:|---:|
-| **gate_passed mean** | **0.30** | **0.42** | **1.32** | **1.44** |
-| turns with gate_passed > 0 | 8 | 8 | 18 | 18 |
-| verbalized in `final_knowledge_sources` | 8 | 8 | 18 | 18 |
-| supplemental_counseling only | 32 | 32 | 22 | 22 |
-| **fully empty turns** | **10** | **10** | **10** | **10** |
-| zero static candidates retrieved | 30 | 30 | 30 | 30 |
-| of those: no passage ≥ 0.38 | 21 | 21 | 21 | 21 |
-| of those: passage but OpenIE empty | 9 | 9 | 9 | 9 |
-| mean candidates in ranker pool | 1.74 | 2.68 | 7.02 | 7.96 |
-| mean passages used | 1.32 | 1.78 | 1.32 | — |
-| live_sentences (sum) | 0 | 0 | 583 | 583 |
-| live_sentence_relevance (sum) | 0 | 0 | 247 | 247 |
-| live OpenIE triplets (sum) | 0 | 0 | 176 | 176 |
-| turns with any live candidate in pool | 0 | 0 | 29 | 29 |
+| metric | static top_n=3 floor=0.38 | static top_n=5 floor=0.38 | static top_n=5 floor=0.15 | static+live top_n=3 | live+top_n=5 |
+|---|---:|---:|---:|---:|---:|
+| **gate_passed mean** | **0.30** | **0.42** | **0.54** | **1.32** | **1.44** |
+| turns with gate_passed > 0 | 8 | 8 | **13** | 18 | 18 |
+| verbalized in `final_knowledge_sources` | 8 | 8 | 13 | 18 | 18 |
+| supplemental_counseling only | 32 | 32 | 29 | 22 | 22 |
+| **fully empty turns** | **10** | **10** | **8** | **10** | **10** |
+| zero static candidates retrieved | 30 | 30 | **1** | 30 | 30 |
+| no passage selected | 21 | 21 | **0** | 21 | 21 |
+| passage but OpenIE empty | 9 | 9 | 1 | 9 | 9 |
+| mean candidates in ranker pool | 1.74 | 2.68 | **7.78** | 7.02 | 7.96 |
+| mean passages used | 1.32 | 1.78 | **4.86** | 1.32 | — |
+| live_sentences (sum) | 0 | 0 | 0 | 583 | 583 |
+| live_sentence_relevance (sum) | 0 | 0 | 0 | 247 | 247 |
+| live OpenIE triplets (sum) | 0 | 0 | 0 | 176 | 176 |
+| turns with any live candidate in pool | 0 | 0 | 0 | 29 | 29 |
 
 ## Part 1 — widening `top_n` 3 → 5 (static, floor still 0.38)
 
@@ -94,6 +95,30 @@ The recurring **Kannada couple** passage is **not** in this empty set; it is cou
 
 2. **Live retrieval alone does materially help gate_passed** (0.30 → 1.32) and verbalized turns (8 → 18), mostly by stuffing the ranker pool. It does **not** shrink fully empty turns (still 10/50). Many live sentences then fail the 0.38 candidate gate.
 
-3. **After both, 10/50 turns (20%) are still empty.** About **4** of those have candidates sitting under 0.38 (threshold/ranking). About **6** (12%) have no static passage, no live candidate, and no counseling-bank hit — generic or NER-only victim spans, or KARE knowledge that never scores ≥ 0.38. Those six need query/bank coverage (or accepting `no_passages_used`), not a larger `top_n`.
+3. **After both (window + live, floor still 0.38), 10/50 turns (20%) are still empty.** About **4** of those have candidates sitting under 0.38 (threshold/ranking). About **6** (12%) have no static passage, no live candidate, and no counseling-bank hit.
 
-Next experiment worth running: **`passage_min_score=0.15` with `top_n=5`**, candidate gate still 0.38, static only — that tests the floor, which this window-count pass could not move.
+## Part 3 — passage floor 0.38 → 0.15 (static, top_n=5, candidate gate still 0.38)
+
+This is the missing variable from Part 1. Production `DEFAULT_PASSAGE_MIN_SCORE` remains **0.38**.
+
+Of the original **21** “no passage ≥ 0.38” turns:
+
+| | count |
+|---|---:|
+| now select a passage at floor=0.15 | **21 / 21** |
+| of those, OpenIE puts candidates in the ranker pool | **21 / 21** |
+| of those, at least one candidate clears the unchanged **0.38** candidate gate | **1 / 21** (dlg 3249 turn 4: `Someone keeps on a social media platform.` score 0.4157) |
+| of those, pool is larger but everything fails 0.38 | **20 / 21** |
+
+So loosening the floor **does** get windows into extraction. It does **not** get those windows through the candidate gate: 20/21 new pools are sub-0.38 noise (typical top scores 0.11–0.31). Dialogue 704 turn 6 now ranks the Kannada-couple passage first at **0.2777** — still below 0.38, same failure mode as predicted.
+
+Empty turns 10 → **8** (3249 newly verbalized from the 21; 2451 was already in the “had candidates below 0.38” bucket and now passes with `Your lover is stalking you.` at 0.437). Mean pool 1.74 → **7.78** with only **+5** turns clearing the candidate gate (8 → 13), of which only **+1** came from the original 21 no-passage turns.
+
+## Recommendation (go / no-go)
+
+1. **`top_n=5`:** no-go for production (Part 1 unchanged).
+2. **`passage_min_score=0.15`:** **no-go for production.** It fills empty pools (30 → 1 zero-candidate turns) but almost entirely with candidates that fail the 0.38 gate (20/21 of the original no-passage turns). Empty turns only drop 10 → 8. That is the Kannada-couple pattern at scale: more retrieval, same gate, more noise.
+3. **Live retrieval** remains the only intervention that materially raises `gate_passed` mean (0.30 → 1.32) and verbalized turns (8 → 18). It still leaves 10 empty turns.
+4. Promoting 0.15 would couple poorly with live (even larger pools of sub-gate sentences). If the candidate gate is ever lowered, re-measure the floor then; do not ship 0.15 while the candidate gate stays 0.38.
+
+Production defaults stay `passage_top_n=3`, `passage_min_score=0.38`, `min_cosine=0.38`.
