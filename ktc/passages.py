@@ -13,7 +13,7 @@ _K_SPLIT = re.compile(r"<K\d+>", re.IGNORECASE)
 # Keep at most this many knowledge passages for OpenIE.
 DEFAULT_PASSAGE_TOP_N = 3
 # Independent of the candidate-level cosine gate; production default stays 0.38.
-DEFAULT_PASSAGE_MIN_SCORE = 0.38
+DEFAULT_PASSAGE_MIN_SCORE = 0.30
 
 
 def split_knowledge_passages(raw_text: str) -> List[str]:

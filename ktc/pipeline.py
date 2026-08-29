@@ -600,7 +600,7 @@ class KnowledgeTripletPipeline:
                 verbalized, supplemental
             )
         context_fallback_used = False
-        if self.context_fallback and not (final_knowledge_text or "").strip():
+        if self.context_fallback and (victim_span or "").strip() and not (final_knowledge_text or "").strip():
             # Gate/retrieval yielded nothing groundable this turn. Rather than
             # returning empty knowledge, make one LLM call that reads the
             # victim's message and dialogue history directly and writes a

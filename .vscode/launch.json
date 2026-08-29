@@ -1,0 +1,36 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+
+        {
+            "name": "Python Debugger: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Debug KTC Stages",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/run_ktc_stages.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "envFile": "${workspaceFolder}/.env",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "args": [
+                "--input",
+                "KARE-data\\KARE\\Data\\KARE.jsonl",
+                "--dialogue_id",
+                "1000",
+                "--turn",
+                "3",
+                "--synthesize",
+                "--enable-live"
+            ],
+            "justMyCode": true
+        }
+    ]
+}
