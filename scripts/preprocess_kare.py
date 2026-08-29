@@ -106,7 +106,7 @@ def build_turn_examples(
 
         if role == "agent" and history:
             dialog_history = " ".join(history)
-            _result, verbalized = process_dialogue_turn(
+            result, verbalized = process_dialogue_turn(
                 pipeline,
                 knowledge_text,
                 dialog_history,
@@ -117,7 +117,22 @@ def build_turn_examples(
             )
             bot_turn += 1
 
-            if verbalized:
+            # Use Stage 6 (final_knowledge_text), not Stage 4 (verbalized).
+            # verbalized is KTC-triplet output only -- it excludes the supplemental
+            # counseling-bank facts and the LLM/concatenation synthesis step.
+            # final_knowledge_text is what run_ktc_stages.py's own inline docs call
+            # "the KT for training/response generation".
+            if knowledge_mode == "ktc" and result is not None:
+                final_text = (result.final_knowledge_text or "").strip()
+                if final_text:
+                    knowledge_for_training = final_text
+                    knowledge_for_eval = final_text
+                else:
+                    knowledge_for_training = NO_PASSAGE_USED
+                    knowledge_for_eval = NO_PASSAGE_USED
+            elif verbalized:
+                # knowledge_mode == "raw" (EMPOWER-KTC ablation): verbalized here is
+                # run_raw_knowledge's output, not Stage 4 -- this branch is correct as-is.
                 knowledge_for_training = " ".join(verbalized)
                 knowledge_for_eval = knowledge_for_training
             else:
