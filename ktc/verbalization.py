@@ -113,6 +113,39 @@ def _make_llm_client(llm_config=None):
     return OpenAI(**kwargs), config
 
 
+_BATCH_LINE_PREFIX = re.compile(r"^\s*(?:\d+[\.\)]|[-*])\s*")
+
+
+def _parse_batched_verbalization(
+    raw: str,
+    triplet_list: List[Triplet],
+    fallback_to_template: bool,
+) -> List[str]:
+    text = (raw or "").strip()
+    if len(triplet_list) == 1 and text and not _BATCH_LINE_PREFIX.match(text.splitlines()[0]):
+        return [_sanitize_llm_sentence(text)]
+    parsed: List[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        stripped = _BATCH_LINE_PREFIX.sub("", stripped, count=1)
+        if stripped:
+            parsed.append(_sanitize_llm_sentence(stripped))
+    if len(parsed) != len(triplet_list):
+        logger.warning(
+            "LLM verbalization line count mismatch: got %s expected %s; using templates",
+            len(parsed),
+            len(triplet_list),
+        )
+        if fallback_to_template:
+            return [verbalize_template(triplet) for triplet in triplet_list]
+        raise ValueError(
+            f"LLM verbalization returned {len(parsed)} lines for {len(triplet_list)} triplets"
+        )
+    return parsed
+
+
 def verbalize_llm(
     triplets: Iterable[Triplet],
     model: Optional[str] = None,
@@ -141,45 +174,44 @@ def verbalize_llm(
 
     client, config = _make_llm_client(llm_config)
     resolved_model = model or config.llm_model
-    sentences: List[str] = []
     system_prompt = (
         "Convert each knowledge triplet into exactly one fluent English sentence. "
-        "Output ONLY the final sentence. No notes, no explanations, no alternative phrasing, "
-        "no preamble, and no markdown. "
+        "Reply with exactly one numbered line per triplet, in the same order as listed. "
+        "Output ONLY those numbered sentences. No notes, no explanations, no alternative "
+        "phrasing, no preamble, and no markdown. "
         "Match the style of these examples:\n\n"
         f"{_LLM_FEW_SHOT_EXAMPLES}"
     )
-    for triplet in triplet_list:
-        user_prompt = (
-            f"Head: {triplet.head}\n"
-            f"Relation: {triplet.relation}\n"
-            f"Tail: {triplet.tail}\n"
-            "Sentence:"
+    listed = "\n".join(
+        f"{index}. Head: {triplet.head} | Relation: {triplet.relation} | Tail: {triplet.tail}"
+        for index, triplet in enumerate(triplet_list, 1)
+    )
+    user_prompt = (
+        "Triplets:\n"
+        f"{listed}\n\n"
+        "Sentences:"
+    )
+    try:
+        response = client.chat.completions.create(
+            model=resolved_model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.2,
+            max_tokens=max(80 * len(triplet_list), 120),
         )
-        try:
-            response = client.chat.completions.create(
-                model=resolved_model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=0.2,
-                max_tokens=80,
+        raw = response.choices[0].message.content or ""
+        return _parse_batched_verbalization(raw, triplet_list, fallback_to_template)
+    except Exception as exc:
+        if fallback_to_template:
+            logger.warning(
+                "LLM verbalization failed for batch of %s triplets: %s; using template",
+                len(triplet_list),
+                exc,
             )
-            sentences.append(_sanitize_llm_sentence(response.choices[0].message.content or ""))
-        except Exception as exc:
-            if fallback_to_template:
-                logger.warning(
-                    "LLM verbalization failed for triplet (%r, %r, %r): %s; using template",
-                    triplet.head,
-                    triplet.relation,
-                    triplet.tail,
-                    exc,
-                )
-                sentences.append(verbalize_template(triplet))
-            else:
-                raise
-    return sentences
+            return [verbalize_template(triplet) for triplet in triplet_list]
+        raise
 
 
 def _triplet_cache_key(triplet: Triplet, backend: str, model: Optional[str]) -> tuple:
