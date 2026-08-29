@@ -51,7 +51,7 @@ from ktc.ranking import (
     get_ranker,
 )
 from ktc.reply_knowledge import is_ktc_usable, is_reply_usable
-from ktc.synthesis import DEFAULT_SYNTHESIS_MODEL, synthesize_evidence
+from ktc.synthesis import DEFAULT_SYNTHESIS_MODEL, synthesize_evidence, synthesize_from_context
 from ktc.triplet import Triplet
 from ktc.verbalization import verbalize_triplets
 
@@ -260,6 +260,7 @@ class KnowledgeTripletPipeline:
     coref_backend: str = "heuristic"
     verbalization_backend: str = "llm"
     synthesis_model: str = DEFAULT_SYNTHESIS_MODEL
+    context_fallback: bool = True
     ranker: Optional[CandidateRanker] = field(default=None, repr=False)
     ranker_backend: str = "auto"
     _nlp: Optional[object] = field(default=None, repr=False)
@@ -332,7 +333,9 @@ class KnowledgeTripletPipeline:
                     triplets.append(triplet)
         return triplets
 
-    def _verbalize_candidates(self, ranked: List[KnowledgeCandidate]) -> List[str]:
+    def _verbalize_candidates(
+        self, ranked: List[KnowledgeCandidate], backend: Optional[str] = None
+    ) -> List[str]:
         result: List[Optional[str]] = [None] * len(ranked)
         static_triplets: List[Triplet] = []
         static_indices: List[int] = []
@@ -350,7 +353,7 @@ class KnowledgeTripletPipeline:
         if static_triplets:
             verbalized = verbalize_triplets(
                 static_triplets,
-                backend=self.verbalization_backend,
+                backend=backend or self.verbalization_backend,
                 model=self.live_config.llm_model,
                 llm_config=self.live_config,
             )
@@ -542,7 +545,12 @@ class KnowledgeTripletPipeline:
         ranked = [c for c in ranked if is_ktc_usable(c)]
         ranked = _dedup_ranked_candidates(ranked)
         supplemental = counseling_candidates(entities, victim_span, situations=situations)
-        verbalized = _dedup_texts(self._verbalize_candidates(ranked))
+        # When evidence synthesis will run below, it makes its own single LLM
+        # call to turn raw facts into fluent prose — so verbalization here uses
+        # the free, local template backend rather than paying for a second
+        # (per-triplet) LLM round trip that synthesis would just rewrite anyway.
+        verbalize_backend = "template" if synthesize else None
+        verbalized = _dedup_texts(self._verbalize_candidates(ranked, backend=verbalize_backend))
         if memory is not None:
             memory.record_facts(verbalized)
         static_verbalized = []
@@ -591,6 +599,23 @@ class KnowledgeTripletPipeline:
             final_knowledge_text, final_sources = assemble_final_knowledge_text(
                 verbalized, supplemental
             )
+        context_fallback_used = False
+        if self.context_fallback and (victim_span or "").strip() and not (final_knowledge_text or "").strip():
+            # Gate/retrieval yielded nothing groundable this turn. Rather than
+            # returning empty knowledge, make one LLM call that reads the
+            # victim's message and dialogue history directly and writes a
+            # safe, generic supportive passage (no invented facts).
+            context_result = synthesize_from_context(
+                dialog_history,
+                victim_span,
+                model=self.live_config.llm_model or self.synthesis_model,
+                llm_config=self.live_config,
+            )
+            if context_result.used_llm and (context_result.text or "").strip():
+                final_knowledge_text = context_result.text.strip()
+                final_sources = ["llm_context_synthesis"]
+                synthesized_knowledge = synthesized_knowledge or context_result.text
+                context_fallback_used = True
         live_pages = list((live_funnel.pages if live_funnel else []) or [])
         verbalized_keys = {_normalize_sentence(text) for text in verbalized}
         for page in live_pages:
@@ -613,6 +638,7 @@ class KnowledgeTripletPipeline:
             "static_triplets": len(filtered or []),
             "gate_passed": len(ranked),
             "final_verbalized_count": len(verbalized),
+            "context_fallback_used": context_fallback_used,
         }
         logger.info(
             "knowledge_funnel live_sentences=%s live_triplets=%s live_sentences_used_directly=%s "

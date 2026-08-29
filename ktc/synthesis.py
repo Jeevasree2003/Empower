@@ -304,6 +304,67 @@ def _passage_is_malformed(text: str) -> bool:
     return False
 
 
+_CONTEXT_SYSTEM_PROMPT = """No grounded facts survived retrieval for this turn. Using ONLY the conversation given, write ONE short (2-4 sentence) warm passage that acknowledges the victim's message and gives general, safe, non-specific supportive guidance (e.g. reach out to someone trusted, local police, or a helpline) WITHOUT inventing any specific phone number, legal section/IPC code, organisation name, or URL, since none were verified for this turn. Do not claim to be human or a professional; do not diagnose. Output ONLY the passage — no title, no notes, no markdown."""
+
+
+def synthesize_from_context(
+    dialog_history: str,
+    victim_span: str,
+    model: str = DEFAULT_SYNTHESIS_MODEL,
+    llm_config=None,
+) -> SynthesisResult:
+    """One LLM call over dialogue context when retrieval produced no grounded facts."""
+    api_key = os.environ.get("LLM_API_KEY", "").strip()
+    if not api_key:
+        logger.warning("LLM_API_KEY not set; skipping context-only synthesis")
+        return SynthesisResult(text="", used_llm=False)
+
+    try:
+        from openai import OpenAI  # noqa: F401 — checked by _make_llm_client
+    except ImportError:
+        logger.warning("openai package not installed; skipping context-only synthesis")
+        return SynthesisResult(text="", used_llm=False)
+
+    history = (dialog_history or "").strip() or "(none)"
+    latest = (victim_span or "").strip() or "(none)"
+    user_prompt = (
+        "Dialogue history:\n"
+        f"{history}\n\n"
+        "Victim's latest message:\n"
+        f"{latest}\n\n"
+        "Supportive passage:"
+    )
+    try:
+        client, _config = _make_llm_client(llm_config)
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": _CONTEXT_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.3,
+            max_tokens=300,
+        )
+        raw = _strip_fences(response.choices[0].message.content or "")
+        passage = _sanitize_synthesis_passage(raw)
+    except Exception as exc:
+        logger.warning("context-only synthesis failed: %s; returning empty knowledge", exc)
+        return SynthesisResult(text="", used_llm=False)
+
+    if _passage_is_malformed(passage):
+        logger.warning("context-only synthesis output malformed; returning empty knowledge")
+        return SynthesisResult(text="", used_llm=False)
+
+    invented = grounding_tokens(passage)
+    if invented:
+        logger.warning(
+            "context-only synthesis invented grounded tokens=%s; returning empty knowledge",
+            sorted(invented),
+        )
+        return SynthesisResult(text="", used_llm=False)
+    return SynthesisResult(text=passage, used_llm=True)
+
+
 def synthesize_evidence(
     candidates: List[KnowledgeCandidate],
     dialog_history: str,
