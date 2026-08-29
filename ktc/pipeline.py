@@ -404,9 +404,13 @@ class KnowledgeTripletPipeline:
         synthesize: bool = False,
         dialogue_id: str = "",
         turn: object = "",
+        context_fallback: Optional[bool] = None,
     ) -> HybridRunResult:
         nlp = self._get_nlp()
         ranker = self._get_ranker()
+        use_context_fallback = (
+            self.context_fallback if context_fallback is None else context_fallback
+        )
         self.api_budget.set_dialogue(str(dialogue_id) if dialogue_id else None)
         query = ranking_query_from_history(dialog_history, nlp=nlp, ranker=ranker)
         victim_turns = victim_utterances_from_history(dialog_history)
@@ -600,7 +604,7 @@ class KnowledgeTripletPipeline:
                 verbalized, supplemental
             )
         context_fallback_used = False
-        if self.context_fallback and (victim_span or "").strip() and not (final_knowledge_text or "").strip():
+        if use_context_fallback and (victim_span or "").strip() and not (final_knowledge_text or "").strip():
             # Gate/retrieval yielded nothing groundable this turn. Rather than
             # returning empty knowledge, make one LLM call that reads the
             # victim's message and dialogue history directly and writes a

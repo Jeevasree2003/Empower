@@ -23,8 +23,9 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections import Counter
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 NO_PASSAGE_USED = "no_passages_used"
 KNOWLEDGE_SEP = "__knowledge__"
@@ -75,6 +76,8 @@ def audit_compare_from_source(
     coref_backend: str,
     top_k: int,
     seed: int,
+    samples_out: Optional[Path] = None,
+    disable_context_fallback: bool = False,
 ) -> None:
     import random
 
@@ -98,46 +101,95 @@ def audit_compare_from_source(
     total = 0
     old_empty = 0
     new_empty = 0
+    all_texts: List[str] = []
+    source_counts: Counter = Counter()
+    fallback_count = 0
 
-    for dialogue in dialogues:
-        utterances = sorted(dialogue["utterances"], key=lambda u: int(u["utterance_no"]))
-        knowledge_text = dialogue.get("knowledge", "") or ""
-        dialogue_id = str(dialogue.get("dialogue_id") or "")
-        history: List[str] = []
-        bot_turn = 0
+    if samples_out is None:
+        samples_out = Path("reports") / "audit_compare_100_samples.jsonl"
+    samples_out.parent.mkdir(parents=True, exist_ok=True)
 
-        for utterance in utterances:
-            formatted = format_utterance(utterance)
-            role = ROLE_MAP.get(utterance["author_role"], utterance["author_role"])
+    with samples_out.open("w", encoding="utf-8") as sample_fh:
+        for dialogue in dialogues:
+            utterances = sorted(dialogue["utterances"], key=lambda u: int(u["utterance_no"]))
+            knowledge_text = dialogue.get("knowledge", "") or ""
+            dialogue_id = str(dialogue.get("dialogue_id") or "")
+            history: List[str] = []
+            bot_turn = 0
 
-            if role == "agent" and history:
-                dialog_history = " ".join(history)
-                result = pipeline.run_hybrid(
-                    knowledge_text,
-                    dialog_history,
-                    enable_live=enable_live,
-                    dialogue_id=dialogue_id,
-                    turn=bot_turn,
-                )
-                bot_turn += 1
-                total += 1
-                if not result.verbalized:
-                    old_empty += 1
-                if not (result.final_knowledge_text or "").strip():
-                    new_empty += 1
+            for utterance in utterances:
+                formatted = format_utterance(utterance)
+                role = ROLE_MAP.get(utterance["author_role"], utterance["author_role"])
 
-            history.append(formatted)
+                if role == "agent" and history:
+                    dialog_history = " ".join(history)
+                    result = pipeline.run_hybrid(
+                        knowledge_text,
+                        dialog_history,
+                        enable_live=enable_live,
+                        dialogue_id=dialogue_id,
+                        turn=bot_turn,
+                        context_fallback=False if disable_context_fallback else None,
+                    )
+                    bot_turn += 1
+                    total += 1
+                    final_text = (result.final_knowledge_text or "").strip()
+                    if not result.verbalized:
+                        old_empty += 1
+                    if not final_text:
+                        new_empty += 1
+                    all_texts.append(final_text)
+                    sources = list(result.final_knowledge_sources or [])
+                    for src in sources:
+                        source_counts[src] += 1
+                    funnel = result.knowledge_funnel or {}
+                    if funnel.get("context_fallback_used"):
+                        fallback_count += 1
+                    sample_fh.write(
+                        json.dumps(
+                            {
+                                "dialogue_id": dialogue_id,
+                                "turn_id": bot_turn - 1,
+                                "final_knowledge_sources": sources,
+                                "counseling_bank_used": getattr(
+                                    result, "counseling_bank_used", None
+                                ),
+                                "context_fallback_used": bool(
+                                    funnel.get("context_fallback_used")
+                                ),
+                                "final_knowledge_text_head": final_text[:150],
+                            },
+                            ensure_ascii=False,
+                        )
+                        + "\n"
+                    )
+
+                history.append(formatted)
 
     def pct(n: int) -> float:
         return round(100.0 * n / total, 2) if total else 0.0
 
-    print(f"Compare mode: {sample_dialogues} dialogues, {total} turns, enable_live={enable_live}")
+    unique_n = len(set(all_texts))
+    text_counts = Counter(all_texts)
+
+    print(
+        f"Compare mode: {sample_dialogues} dialogues, {total} turns, "
+        f"enable_live={enable_live}, context_fallback={not disable_context_fallback}"
+    )
     print("-" * 60)
     print(f"OLD (verbalized only, current preprocess_kare.py bug):")
     print(f"  NO_PASSAGE_USED: {old_empty} / {total} ({pct(old_empty)}%)")
     print(f"NEW (final_knowledge_text, the fix):")
     print(f"  NO_PASSAGE_USED: {new_empty} / {total} ({pct(new_empty)}%)")
     print(f"Turns rescued by the fix: {old_empty - new_empty} ({pct(old_empty - new_empty)}pp)")
+    print(f"Wrote per-turn samples: {samples_out}")
+    print(f"Text diversity: unique={unique_n} vs total={len(all_texts)}")
+    print(f"Source histogram (turns containing each source): {dict(source_counts)}")
+    print(f"context_fallback_used turns: {fallback_count}")
+    print("Top 10 repeated exact final_knowledge_text strings:")
+    for i, (text, count) in enumerate(text_counts.most_common(10), start=1):
+        preview = (text[:200] + "…") if len(text) > 200 else text
+        print(f"  {i:2d}. n={count:4d}  {preview!r}")
 
 
 def main() -> None:
@@ -152,6 +204,18 @@ def main() -> None:
     parser.add_argument("--coref_backend", choices=["heuristic", "model"], default="heuristic")
     parser.add_argument("--top_k", type=int, default=8)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--samples_out",
+        type=Path,
+        default=Path("reports") / "audit_compare_100_samples.jsonl",
+        help="Per-turn diagnostic dump (compare mode only).",
+    )
+    parser.add_argument(
+        "--disable_context_fallback",
+        action="store_true",
+        default=False,
+        help="Turn off LLM context-fallback so empty gated turns stay empty (training-data audit).",
+    )
     args = parser.parse_args()
 
     if args.data_dir is not None:
@@ -160,6 +224,8 @@ def main() -> None:
         audit_compare_from_source(
             args.input, args.sample_dialogues, args.enable_live,
             args.verbalization_backend, args.coref_backend, args.top_k, args.seed,
+            samples_out=args.samples_out,
+            disable_context_fallback=args.disable_context_fallback,
         )
     else:
         parser.error("Pass either --data_dir (audit written files) or --input (compare from source).")

@@ -199,7 +199,7 @@ def verbalize_llm(
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.2,
-            max_tokens=max(80 * len(triplet_list), 120),
+            max_tokens=max(200 * len(triplet_list), 250),
         )
         raw = response.choices[0].message.content or ""
         return _parse_batched_verbalization(raw, triplet_list, fallback_to_template)

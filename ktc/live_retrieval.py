@@ -394,18 +394,28 @@ def enrich_search_results(
     return [got if got is not None else original for got, original in zip(fetched, results)]
 
 
-def _search_tavily(query: str, api_key: str, max_results: int, timeout: int = 10) -> List[dict]:
+def _search_tavily(
+    query: str,
+    api_key: str,
+    max_results: int,
+    timeout: int = 10,
+    include_domains: Optional[List[str]] = None,
+) -> List[dict]:
     import requests
+
+    payload = {
+        "api_key": api_key,
+        "query": query,
+        "search_depth": "basic",
+        "max_results": max_results,
+        "include_answer": False,
+    }
+    if include_domains:
+        payload["include_domains"] = include_domains
 
     response = requests.post(
         "https://api.tavily.com/search",
-        json={
-            "api_key": api_key,
-            "query": query,
-            "search_depth": "basic",
-            "max_results": max_results,
-            "include_answer": False,
-        },
+        json=payload,
         timeout=timeout,
     )
     response.raise_for_status()
@@ -474,7 +484,13 @@ def search_allowlisted(
         if config.search_provider == "serpapi":
             raw_results = _search_serpapi(query, api_key, config.results_per_query * 2, timeout=timeout)
         else:
-            raw_results = _search_tavily(query, api_key, config.results_per_query * 2, timeout=timeout)
+            raw_results = _search_tavily(
+                query,
+                api_key,
+                config.results_per_query * 2,
+                timeout=timeout,
+                include_domains=config.trusted_domains,
+            )
 
         allowlisted: List[SearchResult] = []
         for item in raw_results:

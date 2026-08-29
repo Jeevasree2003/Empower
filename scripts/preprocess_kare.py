@@ -83,6 +83,7 @@ def process_dialogue_turn(
         enable_live=enable_live,
         dialogue_id=str(dialogue_id or ""),
         turn=turn,
+        context_fallback=False,
     )
     return result, result.verbalized
 
