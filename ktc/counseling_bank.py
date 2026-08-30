@@ -130,7 +130,7 @@ def _facts() -> List[CounselingFact]:
         CounselingFact(
             DOMAIN_CLINICAL,
             "KIRAN, the national mental health helpline 1800-599-0019, offers 24x7 distress support in India.",
-            _CRISIS | _GENERAL_SUPPORT,
+            _CRISIS,
             "https://www.mohfw.gov.in/",
         ),
         CounselingFact(

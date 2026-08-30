@@ -158,6 +158,8 @@ def audit_compare_from_source(
                                     funnel.get("context_fallback_used")
                                 ),
                                 "final_knowledge_text_head": final_text[:150],
+                                "final_knowledge_text_full": final_text,
+                                "dialog_history_tail": dialog_history[-300:],
                             },
                             ensure_ascii=False,
                         )

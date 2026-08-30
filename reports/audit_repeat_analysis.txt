@@ -1,0 +1,85 @@
+﻿file=reports\audit_compare_100_samples_no_fallback_full.jsonl
+total_turns=1249
+nonempty=1038 empty=211
+unique_full_texts_among_nonempty=354 vs nonempty=1038
+unique_including_empty=355 vs total=1249
+------------------------------------------------------------
+Top 10 exact final_knowledge_text_full strings:
+
+[1] n=211
+(empty)
+
+[2] n=110
+A victim can file an FIR at the nearest police station; information to police is recorded under CrPC Section 154. Women in distress in India can call the National Commission for Women helpline 181 for support and referral. Cybercrime including online harassment can be reported at the National Cyber Crime Reporting Portal cybercrime.gov.in.
+
+[3] n=63
+KIRAN, the national mental health helpline 1800-599-0019, offers 24x7 distress support in India. Women in distress in India can call the National Commission for Women helpline 181 for support and referral.
+
+[4] n=43
+Rape is a cognizable offence under IPC Section 376; a survivor can file an FIR and seek medical and legal aid without delay. Gang rape is an aggravated offence under IPC Section 376D; a delayed FIR is still valid and a survivor can request a medical examination and police protection. A victim can file an FIR at the nearest police station; information to police is recorded under CrPC Section 154.
+
+[5] n=42
+A victim can file an FIR at the nearest police station; information to police is recorded under CrPC Section 154. Women in distress in India can call the National Commission for Women helpline 181 for support and referral.
+
+[6] n=41
+Cybercrime including online harassment can be reported at the National Cyber Crime Reporting Portal cybercrime.gov.in. Publishing or transmitting obscene or sexually explicit material electronically can be an offence under IT Act Sections 67 and 67A; preserve screenshots and report at cybercrime.gov.in. Non-consensual sharing of intimate images or videos can be reported on cybercrime.gov.in and to the local cyber cell; ask platforms to take the content down.
+
+[7] n=37
+Murder and attempted murder are cognizable offences; report the threat and any evidence to the local police station immediately. A threat to kill can be reported as criminal intimidation; police protection can be requested without delay. A victim can file an FIR at the nearest police station; information to police is recorded under CrPC Section 154.
+
+[8] n=36
+Cybercrime including online harassment can be reported at the National Cyber Crime Reporting Portal cybercrime.gov.in. Publishing or transmitting obscene or sexually explicit material electronically can be an offence under IT Act Sections 67 and 67A; preserve screenshots and report at cybercrime.gov.in. Cyberstalking is an offence under IPC Section 354D; block the accounts, save messages, and report at cybercrime.gov.in.
+
+[9] n=34
+A threat to kill can be reported as criminal intimidation; police protection can be requested without delay. A victim can file an FIR at the nearest police station; information to police is recorded under CrPC Section 154. Women in distress in India can call the National Commission for Women helpline 181 for support and referral.
+
+[10] n=27
+Cybercrime including online harassment can be reported at the National Cyber Crime Reporting Portal cybercrime.gov.in. Cyberstalking is an offence under IPC Section 354D; block the accounts, save messages, and report at cybercrime.gov.in.
+
+============================================================
+Example turns for top 3 most-repeated strings
+
+### Top 1 (n=211)
+TEXT: (empty)
+----------------------------------------
+dialogue_id=1384 turn_id=0
+dialog_history_tail='agent: Good evening! Rakshak this side. How may I assist you today? victim: Hi! my girl friend is in trouble. Can you help her?'
+----------------------------------------
+dialogue_id=1384 turn_id=1
+dialog_history_tail='agent: Good evening! Rakshak this side. How may I assist you today? victim: Hi! my girl friend is in trouble. Can you help her? agent: Yes sure, we will try our very best to help you. May I know with whom I am interacting? victim: I am <person_name> and I am <person_age> year old.'
+----------------------------------------
+dialogue_id=1384 turn_id=2
+dialog_history_tail='to help you. May I know with whom I am interacting? victim: I am <person_name> and I am <person_age> year old. agent: Hi <person_name>, could you please share your problem with us so that we can help you? victim: Before we met, my girl friend was in live-in and now her ex is try to seduce her again.'
+----------------------------------------
+dialogue_id=1384 turn_id=7
+dialog_history_tail="othing happened. agent: I am sorry that your girlfriend is going through all this. Please don't worry, you're not alone. Could you please tell me since when you both are having this problem? victim: Last year we went to Manali and there he met with us and for that time that bastard is bothering her."
+
+### Top 2 (n=110)
+TEXT: A victim can file an FIR at the nearest police station; information to police is recorded under CrPC Section 154. Women in distress in India can call the National Commission for Women helpline 181 for support and referral. Cybercrime including online harassment can be reported at the National Cyber Crime Reporting Portal cybercrime.gov.in.
+----------------------------------------
+dialogue_id=1384 turn_id=14
+dialog_history_tail='gent: You can report this incident to person_X cell and/or National Commission for Women. Would you like to proceed with cyber cell or NCW? victim: First I would go with person_X Cell complaint. agent: Would you like to go for online/offline complaint option? victim: I would go for online complaint.'
+----------------------------------------
+dialogue_id=1384 turn_id=15
+dialog_history_tail='good choice. To proceed, please go to the national cybercrime reporting portal www.cybercrime.gov.in, click on the "Report Other person_X Crime" tab, then "File a complaint," and finally accept the declaration. Please read the instructions and declarations thoroughly. victim: What time it will take?'
+----------------------------------------
+dialogue_id=4901 turn_id=10
+dialog_history_tail=' That is fantastic. Would you like to notify the National Cybercrime Reporting Portal, the National Commission for Women, or the Ministry of Women and Child Development about the incident? victim: How would you go about assisting me in filing a complaint against him through the NCW complaint system?'
+----------------------------------------
+dialogue_id=4901 turn_id=12
+dialog_history_tail=': That is a fantastic pick! To use the NCW site for filing your complaint, go to http://ncwapps.nic.in/onlinecomplaintsv2/. Before filing your complaint by clicking on "Complaint Registration," please read the FAQs carefully. victim: Would you be able to assist me in making a step-by-step complaint?'
+
+### Top 3 (n=63)
+TEXT: KIRAN, the national mental health helpline 1800-599-0019, offers 24x7 distress support in India. Women in distress in India can call the National Commission for Women helpline 181 for support and referral.
+----------------------------------------
+dialogue_id=1882 turn_id=0
+dialog_history_tail='agent: Hello, a very good afternoon. You are connected to Rakshak. How may I help you today? victim: Rakshak my landlord is try to harass me. Please help me.'
+----------------------------------------
+dialogue_id=1525 turn_id=0
+dialog_history_tail='agent: Hello this is Rakshak here and you are most welcome in a secure environment . victim: Hey Rakshak , I heard a lot about you . Can you help me ?'
+----------------------------------------
+dialogue_id=1525 turn_id=1
+dialog_history_tail='agent: Hello this is Rakshak here and you are most welcome in a secure environment . victim: Hey Rakshak , I heard a lot about you . Can you help me ? agent: Thanks for your appreciation . Yes we are here to help you . May I know with whom I am Interacting ? victim: I am <person_name> .'
+----------------------------------------
+dialogue_id=961 turn_id=0
+dialog_history_tail='agent: Good afternoon ! Welcome to Rakshak . How may I assist you today ? victim: Hi Rakshak , would you help me out ?'
