@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import logging
 import random
 import statistics
@@ -531,7 +532,8 @@ def main() -> None:
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s %(message)s")
-    logging.getLogger("ktc.trace_funnel").setLevel(logging.DEBUG)
+    if os.environ.get("KTC_TRACE_DEBUG"):
+        logging.getLogger("ktc.trace_funnel").setLevel(logging.DEBUG)
 
     dialogues = load_dialogues(args.input)
     all_turns = collect_turns(dialogues)
