@@ -104,7 +104,7 @@ def _make_llm_client(llm_config=None):
     config = llm_config or LiveRetrievalConfig.load()
     api_key = os.environ.get("LLM_API_KEY", "").strip()
     base_url = os.environ.get("LLM_API_BASE", "").strip() or (config.llm_api_base or "").strip()
-    kwargs = {"api_key": api_key}
+    kwargs = {"api_key": api_key, "timeout": 30.0, "max_retries": 1}
     if base_url:
         kwargs["base_url"] = base_url
     return OpenAI(**kwargs), config
