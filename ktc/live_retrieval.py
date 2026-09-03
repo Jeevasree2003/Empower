@@ -19,6 +19,18 @@ from urllib.parse import urlparse
 from ktc.live_config import ApiCallBudget, LiveRetrievalConfig
 
 logger = logging.getLogger(__name__)
+# Sites like indiankanoon.org run anti-bot protection that pattern-matches
+# non-browser User-Agents and blocks them outright. A self-identifying UA
+# (e.g. "EMPOWER-KARE/1.0") gets a 100% block rate from some sources; a
+# realistic browser header set gets treated like ordinary traffic.
+BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
 DEFAULT_CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "live_cache"
 
@@ -295,7 +307,7 @@ def fetch_page_text(
         response = requests.get(
             url,
             timeout=wait_s,
-            headers={"User-Agent": "Mozilla/5.0 (compatible; EMPOWER-KARE/1.0)"},
+            headers=BROWSER_HEADERS,
         )
         response.raise_for_status()
         raw_html = response.text

@@ -43,19 +43,36 @@ def split_dialogues(
     test_size: int = 500,
     seed: int = 42,
 ) -> Dict[str, List[dict]]:
-    total = train_size + valid_size + test_size
-    if len(dialogues) < total:
-        # Smoke-test path: use whatever dialogues we have (all in train).
-        return {"train": dialogues, "valid": [], "test": []}
+    """Dialogue-level split. All turns of a dialogue stay in one split.
 
+    KARE.jsonl has 4999 dialogues, one short of the paper's 4000+500+500=5000.
+    Dumping everything into train when ``len < 5000`` was a smoke-test shortcut
+    that wiped valid/test on the full corpus. Held-out sets keep their requested
+    sizes whenever the file is large enough; any shortfall comes out of train.
+    """
+    n = len(dialogues)
+    total = train_size + valid_size + test_size
+    held_out = valid_size + test_size
     shuffled = dialogues.copy()
     rng = random.Random(seed)
     rng.shuffle(shuffled)
 
+    if n < held_out:
+        # Smoke-test path: too few dialogues for valid+test.
+        return {"train": shuffled, "valid": [], "test": []}
+
+    if n >= total:
+        return {
+            "train": shuffled[:train_size],
+            "valid": shuffled[train_size : train_size + valid_size],
+            "test": shuffled[train_size + valid_size : total],
+        }
+
+    train_n = n - held_out
     return {
-        "train": shuffled[:train_size],
-        "valid": shuffled[train_size : train_size + valid_size],
-        "test": shuffled[train_size + valid_size : total],
+        "train": shuffled[:train_n],
+        "valid": shuffled[train_n : train_n + valid_size],
+        "test": shuffled[train_n + valid_size :],
     }
 
 
