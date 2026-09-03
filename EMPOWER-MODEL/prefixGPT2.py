@@ -9,7 +9,8 @@ from transformers.models.gpt2.modeling_gpt2 import (
     logger,
 )
 from typing import Any, Dict, List, Optional, Tuple, Union
-from transformers.modeling_outputs import BaseModelOutputWithPastAndCrossAttentions, ModelOutput, Optional, Tuple, dataclass
+from dataclasses import dataclass
+from transformers.modeling_outputs import BaseModelOutputWithPastAndCrossAttentions, ModelOutput
 from torch.nn import CrossEntropyLoss
 
 

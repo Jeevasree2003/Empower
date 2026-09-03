@@ -1,9 +1,9 @@
 import torch
-from transformers import BartPretrainedModel, GPT2PreTrainedModel
+from transformers import BartPreTrainedModel, GPT2PreTrainedModel
 from torch import nn
 
 
-class PrefixTuningBart(BartPretrainedModel):
+class PrefixTuningBart(BartPreTrainedModel):
 
     use_cross_prefix = True  
     use_encoder_prefix = True

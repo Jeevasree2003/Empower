@@ -21,7 +21,7 @@ python finetune.py \
     --n_val -1 \
     --n_test -1 \
     --tuning_mode "pt2" \
-    --eval_type "seen" \
+    --eval_type "" \
     --mid_dim 800 \
     --preseqlen 64 \
     --do_train

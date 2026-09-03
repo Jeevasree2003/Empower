@@ -2,7 +2,7 @@ export CUDA_VISIBLE_DEVICES=2
 MODEL="gpt2"
 ##DATASET="wow"
 python  finetune.py \
-	--max_source_length 128 \
+	--max_source_length 384 \
 	--max_knowledge_length 256 \
 	--max_target_length 128 \
 	--eval_max_gen_length 128 \
@@ -20,7 +20,7 @@ python  finetune.py \
 	--n_val -1 \
 	--n_test -1 \
 	--tuning_mode "pt1" \
-	--eval_type "seen" \
+	--eval_type "" \
 	--mid_dim 800 \
 	--preseqlen 16 \
 	--do_train
