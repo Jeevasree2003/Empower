@@ -11,7 +11,7 @@ from pathlib import Path
 from torch.utils.data import Dataset
 from typing import Dict
 from transformers import BartTokenizer
-from transformers.utils import cached_property
+from functools import cached_property
 from utils import pickle_load, trim_batch
 from sampler import SortishSampler, DistributedSortishSampler
 from nltk.corpus import stopwords

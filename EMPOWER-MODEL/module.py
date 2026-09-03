@@ -29,8 +29,8 @@ from dataset import KnowledgeSeq2SeqDataset
 from torch.utils.data import DataLoader
 from typing import Dict, List, Tuple, Any
 from utils import sequence_loss
+from torch.optim import AdamW
 from transformers.optimization import (
-    AdamW,
     get_cosine_schedule_with_warmup,
     get_cosine_with_hard_restarts_schedule_with_warmup,
     get_linear_schedule_with_warmup,
@@ -93,6 +93,14 @@ class BaseTransformer(pl.LightningModule):
 
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
+
+        # GPT-2 tokenizers have no sep_token by default. dataset.py joins dialogue
+        # history turns with f" {self.sep_token} " — if this is left unset, that
+        # literally inserts the string "None" between every turn. Add a real
+        # special token instead (vocab grows by 1; embeddings are resized in
+        # PrefixDialogModule before params are frozen).
+        if self.tokenizer.sep_token is None:
+            self.tokenizer.add_special_tokens({"sep_token": "<|sep|>"})
 
     def setup(self, stage=None):
         if stage == "fit":
@@ -204,6 +212,11 @@ class PrefixDialogModule(BaseTransformer):
             config=self.config,
             cache_dir=cache_dir,
         )
+
+        # Must happen before freeze_params: adding sep_token above grows the
+        # tokenizer vocab past the pretrained GPT-2 embedding matrix size.
+        if len(self.tokenizer) != self.model.config.vocab_size:
+            self.model.resize_token_embeddings(len(self.tokenizer))
 
         freeze_params(self.model)
         assert_all_frozen(self.model)

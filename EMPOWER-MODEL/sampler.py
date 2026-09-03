@@ -5,7 +5,7 @@ import torch
 
 from typing import List, Iterable
 from torch.utils.data import Sampler
-from transformers.file_utils import cached_property
+from functools import cached_property
 
 
 def sortish_sampler_indices(data: List, bs: int, shuffle=True) -> np.array:
