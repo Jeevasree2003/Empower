@@ -1,8 +1,8 @@
-export CUDA_VISIBLE_DEVICES=2
+export CUDA_VISIBLE_DEVICES=0
 MODEL="gpt2"
 ##DATASET="wow"
 python  finetune.py \
-	--max_source_length 128 \
+	--max_source_length 512 \
 	--max_knowledge_length 256 \
 	--max_target_length 128 \
 	--eval_max_gen_length 128 \
