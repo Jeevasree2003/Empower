@@ -92,8 +92,11 @@ class BaseTransformer(pl.LightningModule):
             self.tokenizer: PreTrainedTokenizer = tokenizer
 
         if self.tokenizer.pad_token is None:
-             self.tokenizer.pad_token = self.tokenizer.eos_token
-             self.tokenizer.padding_side = 'left'
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+        # Always left-pad for GPT-2 batched generation. pad_token may already be
+        # set (vanilla gpt2 is None; saved best_pt1/best_pt2 tokenizers already
+        # use eos as pad) while padding_side stays HuggingFace's default "right".
+        self.tokenizer.padding_side = "left"
 
         # GPT-2 tokenizers have no sep_token by default. dataset.py joins dialogue
         # history turns with f" {self.sep_token} " — if this is left unset, that
