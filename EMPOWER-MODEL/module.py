@@ -92,7 +92,8 @@ class BaseTransformer(pl.LightningModule):
             self.tokenizer: PreTrainedTokenizer = tokenizer
 
         if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
+             self.tokenizer.pad_token = self.tokenizer.eos_token
+             self.tokenizer.padding_side = 'left'
 
         # GPT-2 tokenizers have no sep_token by default. dataset.py joins dialogue
         # history turns with f" {self.sep_token} " — if this is left unset, that
