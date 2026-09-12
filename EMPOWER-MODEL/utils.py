@@ -132,17 +132,18 @@ def trim_batch(
     pad_token_id,
     attention_mask=None,
 ):
-    """Remove columns that are populated exclusively by pad_token_id"""
-    
+    """Drop columns that are padding in every row.
 
-    
-    keep_column_mask = input_ids.ne(pad_token_id).any(dim=0)    
+    GPT-2 uses the same id for pad and eos, so trimming by ``input_ids ==
+    pad_token_id`` can delete a real end-of-text column. Prefer the attention
+    mask when it is provided (keep a column if any row has mask==1).
+    """
+    if attention_mask is not None:
+        keep_column_mask = attention_mask.ne(0).any(dim=0)
+        return input_ids[:, keep_column_mask], attention_mask[:, keep_column_mask]
 
-    
-    if attention_mask is None:
-        return input_ids[:, keep_column_mask]
-    else:
-        return (input_ids[:, keep_column_mask], attention_mask[:, keep_column_mask])
+    keep_column_mask = input_ids.ne(pad_token_id).any(dim=0)
+    return input_ids[:, keep_column_mask]
 
 
 def pickle_save(obj, path):

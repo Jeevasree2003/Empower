@@ -12,8 +12,10 @@ logging.basicConfig(format='--- %(levelname)s: %(message)s ---',
 
 
 def get_early_stopping_callback(metric, patience):
+    # PrefixDialogModule logs `f1` / `loss` (not `val_f1`). Monitor the same
+    # names ModelCheckpoint uses so early stopping actually fires.
     return EarlyStopping(
-        monitor=f"val_{metric}",  
+        monitor=metric,
         mode="min" if "loss" in metric else "max",
         patience=patience,
         verbose=True,

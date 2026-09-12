@@ -390,6 +390,13 @@ def add_args(parser):
         "--preseqlen",
         type=int,
         default=10,
+        help="Trainable prefix length (KDPT knowledge prefix, or RDPT response prefix).",
+    )
+    prefix_group.add_argument(
+        "--klg_preseqlen",
+        type=int,
+        default=16,
+        help="Frozen KDPT prefix length when loading pfxKlgModel (pt2). Must match KDPT training.",
     )
 
     return parser

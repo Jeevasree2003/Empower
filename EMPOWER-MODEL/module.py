@@ -1,4 +1,5 @@
 import argparse
+import copy
 import torch
 import time
 import pytorch_lightning as pl
@@ -105,6 +106,7 @@ class BaseTransformer(pl.LightningModule):
         # PrefixDialogModule before params are frozen).
         if self.tokenizer.sep_token is None:
             self.tokenizer.add_special_tokens({"sep_token": "<|sep|>"})
+        self.config.pad_token_id = self.tokenizer.pad_token_id
 
     def setup(self, stage=None):
         if stage == "fit":
@@ -240,11 +242,22 @@ class PrefixDialogModule(BaseTransformer):
             assert self.hparams.pfxKlgModel_name_or_path is not None, "Requiring model pretrained on first stage..."
             logging.info('---  loading from {}  ---'.format(hparams.pfxKlgModel_name_or_path))
 
+            # KDPT was trained with klg_preseqlen (16). RDPT's trainable prefix
+            # uses --preseqlen (64). One shared hparams.preseqlen would rebuild
+            # the frozen knowledge prefix with the wrong embedding size.
+            klg_hparams = copy.copy(hparams)
+            klg_hparams.preseqlen = getattr(hparams, "klg_preseqlen", 16)
+            logging.info(
+                "---  KDPT prefix preseqlen=%s; RDPT prefix preseqlen=%s  ---",
+                klg_hparams.preseqlen,
+                hparams.preseqlen,
+            )
+
             self.prefix_model = PrefixTuning.from_pretrained(
                 self.hparams.pfxKlgModel_name_or_path,
                 cache_dir=cache_dir,
                 config=self.config,
-                hparams=self.hparams,
+                hparams=klg_hparams,
             )
 
             freeze_params(self.prefix_model)
@@ -477,28 +490,27 @@ class PrefixDialogModule(BaseTransformer):
             assert emb_weight.requires_grad is False
             prefix_past_kv_list, prefix_key_padding_mask, _ = self.prefix_model_2.get_prompt_2(bsz, klg_prompt_dict, emb_weight)
 
-        batch_size = batch["input_ids"].size(0)
-        input_ids = torch.full([batch_size, 1], fill_value=self.config.bos_token_id).to(batch["input_ids"].device)
-        input_ids = torch.cat([batch["input_ids"], input_ids], dim=-1)
-
-        attention_mask = torch.ones([batch_size, 1]).to(input_ids.device)
-        attention_mask = torch.cat([batch["attention_mask"], attention_mask], dim=-1)
-
-        generated_ids = self.model.generate(
-            input_ids,
+        prompt_len = batch["input_ids"].size(-1)
+        # Do not append BOS: GPT-2 pad/eos/bos share one id, so a trailing BOS
+        # is reported as right-padding and corrupts batched generate().
+        generate_kwargs = dict(
             pref_past_kv_list=prefix_past_kv_list,
             pref_key_padding_mask=prefix_key_padding_mask,
-            attention_mask=attention_mask,
+            attention_mask=batch["attention_mask"],
             use_cache=True,
-            num_beams=self.eval_beams,
-            max_length=batch["input_ids"].size(-1) + self.eval_max_length,
-            min_length=batch["input_ids"].size(-1) + self.eval_min_length,
-            no_repeat_ngram_size=self.hparams.no_repeat_ngram_size,
+            max_length=prompt_len + self.eval_max_length,
+            min_length=prompt_len + self.eval_min_length,
             pad_token_id=self.pad,
             eos_token_id=self.tokenizer.eos_token_id,
         )
+        if self.eval_beams is not None:
+            generate_kwargs["num_beams"] = self.eval_beams
+        ngram = self.hparams.no_repeat_ngram_size
+        if ngram:
+            generate_kwargs["no_repeat_ngram_size"] = ngram
 
-        generated_ids = generated_ids[:, batch["input_ids"].size(-1):]
+        generated_ids = self.model.generate(batch["input_ids"], **generate_kwargs)
+        generated_ids = generated_ids[:, prompt_len:]
 
         gen_time = (time.time() - t0) / batch["input_ids"].shape[0]
         preds: List[str] = self.ids_to_clean_text(generated_ids)
@@ -522,27 +534,30 @@ class PrefixDialogModule(BaseTransformer):
         generative_metrics = {
             k: np.array([x[k].detach().cpu() if type(x[k]) is torch.Tensor else x[k] for x in outputs]).mean() for k in self.metric_names + ["gen_time", "gen_len"]
         }
-        metric_val = (
-            generative_metrics[self.val_metric] if self.val_metric in generative_metrics else losses[self.val_metric]
-        )
+        preds = flatten_list([x["preds"] for x in outputs])
+        target = flatten_list([x["target"] for x in outputs])
+        f1 = f1_metric(preds, target)
+        ppl = math.exp(loss.item() if torch.is_tensor(loss) else loss)
+
+        if self.val_metric == "f1":
+            metric_val = f1
+        elif self.val_metric in generative_metrics:
+            metric_val = generative_metrics[self.val_metric]
+        else:
+            metric_val = losses[self.val_metric]
         metric_tensor: torch.FloatTensor = torch.tensor(metric_val).type_as(loss)
         generative_metrics.update({k: v.item() for k, v in losses.items()})
         losses.update(generative_metrics)
 
         all_metrics = {f"{prefix}_avg_{k}": x for k, x in losses.items()}
         all_metrics["step_count"] = self.step_count
-
-        preds = flatten_list([x["preds"] for x in outputs])
-        target = flatten_list([x["target"] for x in outputs])
-
-        f1 = f1_metric(preds, target)
-        ppl = math.exp(loss)
-
-        self.log('f1', f1)
-        self.log('loss', loss)
-
         all_metrics["F1"] = f"{f1 * 100.:.2f}"
         all_metrics["PPL"] = f"{ppl:.4f}"
+
+        self.log("f1", f1, on_epoch=True, prog_bar=True)
+        self.log("loss", loss, on_epoch=True, prog_bar=True)
+        if prefix == "val":
+            self.log("val_f1", f1, on_epoch=True)
 
         self.metrics[prefix].append(all_metrics)  
 

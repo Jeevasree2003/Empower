@@ -16,3 +16,8 @@ EMPOWER-MODEL/output/preds.txt
 EMPOWER-MODEL/output_final/
 EMPOWER-MODEL/output_rdpt/
 EMPOWER-MODEL/output_rdpt_v2/
+EMPOWER-MODEL/output_kdpt_v2/
+EMPOWER-MODEL/output_rdpt_v3/
+EMPOWER-MODEL/output_gen_v1/
+EMPOWER-MODEL/output_gen_v2/
+EMPOWER-MODEL/output_kdpt_smoke/

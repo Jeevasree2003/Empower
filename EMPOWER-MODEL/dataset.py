@@ -183,6 +183,11 @@ class KnowledgeSeq2SeqDataset(Dataset):
                 _l = json.loads(_l)
                 history = f" {self.sep_token} ".join(_l["history"])
                 golden_knowledge = _l["knowledge"][0]
+                if "__knowledge__" in golden_knowledge:
+                    train_knowledge, _eval_knowledge = golden_knowledge.split("__knowledge__", 1)
+                    train_knowledge = train_knowledge.strip()
+                else:
+                    train_knowledge = golden_knowledge
                 response = _l["response"]
 
                 bow_response = self.get_bow_response(response)
@@ -192,7 +197,7 @@ class KnowledgeSeq2SeqDataset(Dataset):
                 self._data.append(
                     {
                         "history": history,
-                        "knowledge": golden_knowledge,
+                        "knowledge": train_knowledge,
                         "response": response,
                         "bow_response": bow_response
                     }
@@ -228,21 +233,26 @@ class KnowledgeSeq2SeqDataset(Dataset):
         source_ids = source_inputs["input_ids"].squeeze()
         target_ids = target_inputs["input_ids"].squeeze()
         src_mask = source_inputs["attention_mask"].squeeze()
+        label_mask = target_inputs["attention_mask"].squeeze()
 
         if self.tuning_mode == "pt2":
             bow_target = self.encode_line(self.tokenizer, bow_tgt, self.max_target_length)
             bow_target_ids = bow_target['input_ids'].squeeze()
+            bow_mask = bow_target["attention_mask"].squeeze()
             return {
                 "input_ids": source_ids,
                 "attention_mask": src_mask,
                 "labels": target_ids,
-                "bow_targets": bow_target_ids
+                "label_attention_mask": label_mask,
+                "bow_targets": bow_target_ids,
+                "bow_attention_mask": bow_mask,
             }
 
         return {
             "input_ids": source_ids,
             "attention_mask": src_mask,
             "labels": target_ids,
+            "label_attention_mask": label_mask,
         }
 
     def collate_fn(self, batch) -> Dict[str, torch.Tensor]:
@@ -250,14 +260,16 @@ class KnowledgeSeq2SeqDataset(Dataset):
         input_ids = torch.stack([x["input_ids"] for x in batch])
         masks = torch.stack([x["attention_mask"] for x in batch])
         target_ids = torch.stack([x["labels"] for x in batch])
+        label_masks = torch.stack([x["label_attention_mask"] for x in batch])
 
         source_ids, source_mask = trim_batch(input_ids, pad_token_id, attention_mask=masks)
-        y = trim_batch(target_ids, pad_token_id)
+        y, _ = trim_batch(target_ids, pad_token_id, attention_mask=label_masks)
 
         if self.tuning_mode == "pt2":
 
             bow_target_ids = torch.stack([x['bow_targets'] for x in batch])
-            bow_y = trim_batch(bow_target_ids, pad_token_id)
+            bow_masks = torch.stack([x["bow_attention_mask"] for x in batch])
+            bow_y, _ = trim_batch(bow_target_ids, pad_token_id, attention_mask=bow_masks)
 
             return {
                 "input_ids": source_ids,
