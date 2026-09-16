@@ -2039,9 +2039,9 @@ class TestPipelineIntegration(unittest.TestCase):
 
         return _Ranker()
 
-    def test_config_defaults_live_retrieval_off(self):
+    def test_config_defaults_live_retrieval_on(self):
         config = LiveRetrievalConfig.load()
-        self.assertFalse(config.enable_live_retrieval)
+        self.assertTrue(config.enable_live_retrieval)
 
     def test_static_run_does_not_call_live_fetch(self):
         from ktc.pipeline import KnowledgeTripletPipeline
@@ -2061,7 +2061,7 @@ class TestPipelineIntegration(unittest.TestCase):
         joined = " ".join(sentences).lower()
         self.assertNotIn("lodge a police station", joined)
 
-    def test_run_omitted_enable_live_follows_config_off(self):
+    def test_run_omitted_enable_live_follows_instance_config(self):
         from ktc.pipeline import KnowledgeTripletPipeline
 
         with mock.patch("ktc.pipeline.fetch_live_knowledge") as fetch:
@@ -2071,6 +2071,7 @@ class TestPipelineIntegration(unittest.TestCase):
                 ranker=self._passthrough_ranker(),
                 min_cosine=0.0,
             )
+            pipeline.live_config.enable_live_retrieval = False
             pipeline.run(
                 "Victims can file a complaint online.",
                 "agent: Hi. victim: I need help.",

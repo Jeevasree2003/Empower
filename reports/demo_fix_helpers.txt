@@ -1,0 +1,4 @@
+Traceback (most recent call last):
+  File "C:\Empower\Empower\scripts\_tmp_demo_fix_check.py", line 1, in <module>
+    from demo.app import _strip_demo_flags
+ModuleNotFoundError: No module named 'demo'

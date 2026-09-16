@@ -78,6 +78,8 @@ _TEMPLATE_PRIORITY = {
     "sit_fraud": 0,
     "sit_missing": 0,
     "sit_child_exploitation": 0,
+    "sit_child_assault": 0,
+    "sit_physical_assault": 0,
     "sit_online_harassment": 0,
     "sit_identity_theft": 0,
     "sit_online_bullying": 0,
@@ -118,6 +120,8 @@ _SITUATION_RANK_HINTS = {
     "desertion_bigamy": "IPC 494 bigamy 498A cruelty",
     "domestic_violence": "domestic violence 498A PWDVA helpline 181",
     "child_exploitation": "POCSO Act Childline 1098 Child Welfare Committee child sexual abuse trafficking",
+    "child_assault": "Childline 1098 child physical assault FIR 112 Child Welfare Committee",
+    "physical_assault": "physical assault beating FIR 112 women helpline 181",
     "online_harassment": "IT Act 67 67A obscene content cybercrime.gov.in online sexual coercion",
     "identity_theft": "identity theft impersonation Aadhaar bank KYC cybercrime.gov.in",
     "online_bullying": "cyberbullying online bullying school social media complaint India",
@@ -146,6 +150,8 @@ _SITUATION_REQUIRED_FACT_KEYWORDS: Dict[str, List[str]] = {
     "desertion_bigamy": ["494", "498a", "bigamy"],
     "domestic_violence": ["498a", "pwdva", "181"],
     "child_exploitation": ["pocso", "1098", "child welfare"],
+    "child_assault": ["1098", "112", "child welfare"],
+    "physical_assault": ["112", "181", "fir"],
     "online_harassment": ["67a", "cybercrime.gov.in", "obscene"],
     "identity_theft": ["identity theft", "aadhaar", "cybercrime.gov.in"],
     "online_bullying": ["cyberbullying", "complaint", "social media"],
@@ -220,6 +226,12 @@ SITUATION_EXEMPLARS: Dict[str, str] = {
     ),
     "child_exploitation": (
         "A shelter home owner sexually assaults teen girls in his care and exploits children and minors."
+    ),
+    "child_assault": (
+        "A person beat a child below 18 years very badly and the child needs police and medical help."
+    ),
+    "physical_assault": (
+        "My friend is beating me badly and I need police and medical help right now."
     ),
     "online_harassment": (
         "Someone sent unsolicited obscene sexual content on social media messenger and coerced me into a sexual relationship."
@@ -373,6 +385,15 @@ def dialogue_situations(victim_text: str) -> List[str]:
         r"\b(beat|abuse|threat|harass|violence|kick)\b", text
     ):
         add("domestic_violence")
+    if re.search(r"\b(child|minor|kid|below\s*18|under\s*18)\b", text) and re.search(
+        r"\b(beat|beaten|beating|assault|hurt|hit|slapped|thrashed)\b", text
+    ):
+        add("child_assault")
+    elif re.search(
+        r"\b(beat(?:ing|en)?|assault(?:ed|ing)?|slapped|thrashed|hitting me|hit me)\b",
+        text,
+    ):
+        add("physical_assault")
     if "insane" in text or "mental" in text:
         add("help_seeking")
     return found
@@ -616,6 +637,40 @@ def _situation_queries(
                     CATEGORY_CRIME,
                     "sit_pwdva",
                 )
+            )
+        elif name == "physical_assault":
+            queries.extend(
+                [
+                    _sq(
+                        f"how to report physical assault beating FIR police India official {year}",
+                        "physical assault",
+                        CATEGORY_CRIME,
+                        "sit_physical_assault",
+                    ),
+                    _sq(
+                        f"women helpline 181 112 physical assault emergency India {year}",
+                        "physical assault",
+                        CATEGORY_CRIME,
+                        "sit_physical_assault",
+                    ),
+                ]
+            )
+        elif name == "child_assault":
+            queries.extend(
+                [
+                    _sq(
+                        f"Childline 1098 24x7 helpline child beaten physical assault India official {year}",
+                        "child physical assault",
+                        CATEGORY_CRIME,
+                        "sit_child_assault",
+                    ),
+                    _sq(
+                        f"how to report child physical abuse beating to police Child Welfare Committee India {year}",
+                        "child physical assault",
+                        CATEGORY_CRIME,
+                        "sit_child_assault",
+                    ),
+                ]
             )
         elif name == "child_exploitation":
             queries.extend(

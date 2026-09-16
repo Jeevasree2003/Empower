@@ -1,0 +1,13 @@
+﻿history: victim: A child below 18 years was beaten very badly by a person
+corpus: C:\Empower\Empower\KARE-data\KARE\Data\KARE.jsonl
+live_enabled: False
+live_sentences: 0
+passages: 8
+  [1] he used to beat out mom also very ba 15 Sep, 2021 I want to know if a father is harassing a daughter mentally then what legal actions she should take or she has.16 Sep, 2021 Hello Kavisha, don't worry our Legal Expert will get back to you t
+  [2] he used to beat out mom also very ba You can report online abuse in any of the following ways: When you go to the police station to complain about a case of online abuse that you have faced, they will ask you to file an FIR. I need to know 
+  [3] he used to beat out mom also very ba If Police denies to lodge complain then either go to the nearest Court of your area or go to the Superintendent of Police of your area and lodge the complain. before resorting to law and enforcement agen
+  [4] the reason i came here is that the house torture . 15 Sep, 2021 I want to know if a father is harassing a daughter mentally then what legal actions she should take or she has.16 Sep, 2021 Hello Kavisha, don't worry our Legal Expert will get
+  [5] I hav I shown and told the above same thing in front of tribunal officer then after hearing from both the parties he told to go for conciliation . 15 Sep, 2021 I want to know if a father is harassing a daughter mentally then what legal acti
+sources: ['verbalized', 'supplemental_counseling']
+final_knowledge:
+If a child has been beaten or physically assaulted, call 112 and Childline 1098 immediately, get medical care, and inform the nearest police. The Child Welfare Committee can arrange protection; do not delay treatment. Childline 1098 is the 24x7 emergency helpline for children in distress in India and can connect you to local protection services. A victim can file an FIR at the nearest police station; information to police is recorded under CrPC Section 154.

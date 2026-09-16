@@ -22,6 +22,9 @@ _CRIME_TERMS = (
     "gang-rape",
     "molestation",
     "assault",
+    "beating",
+    "beaten",
+    "beat",
     "domestic violence",
     "abuse",
     "blackmail",
@@ -275,6 +278,8 @@ def extract_entities(victim_utterance: str, nlp=None) -> List[Dict[str, str]]:
     if "husband" in lower or "wife" in lower:
         if any(v in lower for v in ("kill", "murder", "beat", "abuse", "threat")):
             add("domestic violence", CATEGORY_CRIME)
+    if re.search(r"\b(beat(?:ing|en)?|assault(?:ed|ing)?|slapped|thrashed)\b", lower):
+        add("assault", CATEGORY_CRIME)
 
     if re.search(r"\blife\s+is\s+in\s+risk\b", lower) or re.search(
         r"\blife\s+(?:at|in)\s+risk\b", lower

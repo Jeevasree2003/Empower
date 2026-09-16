@@ -11,6 +11,9 @@ numpy
 pyyaml
 requests
 python-dotenv
+gradio
+ollama
+huggingface-hub>=0.23.2,<1.0
 
 # Live retrieval + summarization (hybrid knowledge path)
 openai

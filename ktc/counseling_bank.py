@@ -63,6 +63,11 @@ _VIOLENCE = frozenset(
         "abuse",
         "stalking",
         "torture",
+        "beat",
+        "beaten",
+        "beating",
+        "child_assault",
+        "physical_assault",
     }
 )
 _PROCEDURE = frozenset(
@@ -86,6 +91,8 @@ _CYBER = frozenset(
 _GENERAL_SUPPORT = frozenset({"general_support"})
 _SITUATION_LEGAL = frozenset(
     {
+        "child_assault",
+        "physical_assault",
         "child_exploitation",
         "online_harassment",
         "identity_theft",
@@ -250,6 +257,19 @@ def _facts() -> List[CounselingFact]:
         ),
         CounselingFact(
             DOMAIN_LEGAL,
+            "If someone is beating or physically assaulting you, move to a safer place if you can, call 112, and seek medical care. You can file an FIR at the nearest police station; women in distress can also call 181.",
+            frozenset({"physical_assault", "beat", "beaten", "beating", "assault"}),
+            emergency=True,
+        ),
+        CounselingFact(
+            DOMAIN_LEGAL,
+            "If a child has been beaten or physically assaulted, call 112 and Childline 1098 immediately, get medical care, and inform the nearest police. The Child Welfare Committee can arrange protection; do not delay treatment.",
+            frozenset({"child_assault", "beaten", "beat"}),
+            "https://www.childlineindia.org/",
+            emergency=True,
+        ),
+        CounselingFact(
+            DOMAIN_LEGAL,
             "Sexual offences against children are covered by the POCSO Act; report immediately to police and the Child Welfare Committee.",
             frozenset({"child_exploitation", "trafficking"}),
             "https://wcd.nic.in/",
@@ -258,7 +278,7 @@ def _facts() -> List[CounselingFact]:
         CounselingFact(
             DOMAIN_LEGAL,
             "Childline 1098 is the 24x7 emergency helpline for children in distress in India and can connect you to local protection services.",
-            frozenset({"child_exploitation", "trafficking"}),
+            frozenset({"child_exploitation", "trafficking", "child_assault"}),
             "https://www.childlineindia.org/",
             emergency=True,
         ),
@@ -350,6 +370,9 @@ def _trigger_keys(
         "loan",
         "torture",
         "frustrated",
+        "beat",
+        "beating",
+        "beaten",
     ):
         if re.search(r"\b" + re.escape(token) + r"\b", lower):
             keys.add(token)
@@ -371,6 +394,18 @@ def _trigger_keys(
     if re.search(r"raped by\s+\d|gang\s+rape", lower):
         keys.add("gang rape")
         keys.add("rape")
+    if re.search(r"\b(child|minor|kid|below\s*18|under\s*18)\b", lower) and re.search(
+        r"\b(beat|beaten|beating|assault|hurt|hit|slapped|thrashed|physically)\b",
+        lower,
+    ):
+        keys.add("child_assault")
+        keys.add("beaten")
+    elif re.search(
+        r"\b(beat(?:ing|en)?|assault(?:ed|ing)?|slapped|thrashed|hitting me|hit me)\b",
+        lower,
+    ):
+        keys.add("physical_assault")
+        keys.add("beating")
     if any(re.search(pattern, lower) for pattern in _GENERAL_HELP_PATTERNS):
         keys.add("general_support")
     for name in situations or ():
