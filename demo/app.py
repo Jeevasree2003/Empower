@@ -41,34 +41,12 @@ def build_interface(use_rdpt: bool = True):
         "This is not a substitute for police, medical care, or a lawyer."
     )
 
-    with gr.Blocks(title="Rakshak") as demo:
-        gr.Markdown(f"# Rakshak\n{description}")
-        try:
-            chatbot = gr.Chatbot(label="Conversation", type="messages")
-            messages_format = True
-        except TypeError:
-            chatbot = gr.Chatbot(label="Conversation")
-            messages_format = False
-        msg = gr.Textbox(placeholder="Describe the situation…", label="Message", lines=3)
-        send = gr.Button("Send")
-
-        def user_submit(message, history):
-            history = history or []
-            text = (message or "").strip()
-            if not text:
-                return "", history
-            answer = reply(text, history)
-            if messages_format:
-                history = history + [
-                    {"role": "user", "content": text},
-                    {"role": "assistant", "content": answer},
-                ]
-            else:
-                history = history + [[text, answer]]
-            return "", history
-
-        msg.submit(user_submit, [msg, chatbot], [msg, chatbot])
-        send.click(user_submit, [msg, chatbot], [msg, chatbot])
+    demo = gr.ChatInterface(
+        fn=reply,
+        title="Rakshak",
+        description=description,
+        textbox=gr.Textbox(placeholder="Describe the situation…", lines=3),
+    )
     return demo
 
 
