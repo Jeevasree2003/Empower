@@ -106,11 +106,35 @@ class RetrieveResult:
     error: str = ""
 
 
+def _content_to_text(content) -> str:
+    """Normalize a Gradio chat message's `content` field to plain text.
+
+    Depending on Gradio version/config, `content` may be a plain string or a
+    list of content parts (e.g. [{"type": "text", "text": "..."}]). This
+    handles both shapes so format_history never crashes on a list.
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict):
+                text = part.get("text") or part.get("content") or ""
+                if isinstance(text, str):
+                    parts.append(text)
+        return " ".join(p for p in parts if p).strip()
+    return str(content).strip()
+
+
 def format_history(messages: List[dict], latest_user: str) -> str:
     parts: List[str] = []
     for item in messages:
         role = (item.get("role") or "").lower()
-        content = (item.get("content") or "").strip()
+        content = _content_to_text(item.get("content"))
         if not content:
             continue
         if role in {"user", "victim"}:

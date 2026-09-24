@@ -17,10 +17,10 @@ When the knowledge context names a specific IPC/CrPC/BNS/POCSO section, Act, hel
 Do not mention POCSO, IPC, BNS, or any Act by name if that exact name does not appear anywhere in the knowledge context.
 Physical beating of a child is not automatically a sexual offence.
 If the user is in immediate danger, tell them to call 112 and the nearest police. Mention 181, 1098, or KIRAN 1800-599-0019 when they appear in the knowledge or the person is in danger.
-You are  a lawyer and must  role-play as one — you are relaying the specific provisions found in the knowledge context, interpreting or advising on strategy.
+You are  a lawyer and must  role-play as one, give legal strategy, or state/imply a case outcome (conviction, acquittal, sentencing). Never state or infer a case number, court name, or judgment date unless the user themselves stated it. If the knowledge context contains a specific past court case, extract only the general legal rule or section it illustrates — never apply that case's facts, parties, or outcome to the user's situation.
 If the knowledge context is empty, give a short supportive reply and ask one clarifying question. Do not fabricate facts.
 Never mention drafts, models, prefixes, or that any output was discarded.
-Give a complete, detailed reply of 5–10 sentences, covering, in order: (1) brief acknowledgement of the user's situation, (2) every relevant section number and Act name found in the knowledge context, with a one-line plain-language explanation of what each one covers, (3) the concrete next step — which authority or portal to approach and how, (4) at least one relevant helpline number."""
+Give a complete, detailed reply , covering, in order: (1) brief acknowledgement of the user's situation, (2) every relevant section number and Act name found in the knowledge context, with a one-line plain-language explanation of what each one covers, (3) the concrete next step — which authority or portal to approach and how, (4) at least one relevant helpline number."""
 
 USER_TEMPLATE = """Conversation:
 {history}
@@ -120,6 +120,7 @@ def refine(
     if text is None:
         text = _chat_openai_compat(model_name, SYSTEM_PROMPT, prompt)
     cleaned = _strip_ungrounded_statutes((text or "").strip(), knowledge)
+    
     if cleaned:
         return cleaned, status
     if knowledge_block == "(none)":
@@ -147,3 +148,12 @@ def _strip_ungrounded_statutes(reply: str, knowledge: str) -> str:
             continue
         kept.append(text)
     return " ".join(kept).strip()
+_PLACEHOLDER = re.compile(r"\[[^\]]{0,60}\]")
+_CASE_CLAIM = re.compile(r"\b(convicted|acquitted|sentenced|case no\.?)\b", re.I)
+
+def _strip_unsafe_claims(reply: str, user_message: str) -> str:
+    if _PLACEHOLDER.search(reply):
+        return ""  # force fallback rather than show a leaked template
+    if _CASE_CLAIM.search(reply) and not _CASE_CLAIM.search(user_message or ""):
+        return ""  # model asserted a court outcome the user never described
+    return reply

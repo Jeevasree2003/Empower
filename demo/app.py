@@ -45,7 +45,7 @@ def build_interface(use_rdpt: bool = True):
         fn=reply,
         title="Rakshak",
         description=description,
-        textbox=gr.Textbox(placeholder="Describe the situation…", lines=3),
+        textbox=gr.Textbox(placeholder="Describe the situation…", lines=1),
     )
     return demo
 
