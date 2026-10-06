@@ -36,9 +36,6 @@ def build_interface(use_rdpt: bool = True):
 
     description = (
         "Women and child safety counselling assistant. "
-        "Uses live web search when LIVE_SEARCH_API_KEY is set. "
-        "Emergency: 112. Women in distress: 181. Childline: 1098. KIRAN: 1800-599-0019. "
-        "This is not a substitute for police, medical care, or a lawyer."
     )
 
     demo = gr.ChatInterface(
